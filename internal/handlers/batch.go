@@ -27,15 +27,30 @@ import (
 
 var errBatchPaused = errors.New("batch download paused")
 
+type batchOSSUploader interface {
+	UploadVideo(ctx context.Context, filePath, materialID string, scrapedDate time.Time) (services.OSSUploadResult, error)
+}
+
+type batchOSSProgressUploader interface {
+	UploadVideoWithProgress(
+		ctx context.Context,
+		filePath, materialID string,
+		scrapedDate time.Time,
+		onProgress func(uploaded, total int64),
+	) (services.OSSUploadResult, error)
+}
+
 // BatchHandler 批量下载处理器
 type BatchHandler struct {
 	downloadService *services.DownloadRecordService
 	settingsRepo    *database.SettingsRepository
+	exportRepo      *database.ExportRecordRepository
 	gopeedService   *services.GopeedService // Injected Gopeed Service
 	mu              sync.RWMutex
 	tasks           []BatchTask
 	running         bool
 	cancelFunc      context.CancelFunc // 用于取消时立即中断下载
+	ossUploader     batchOSSUploader   // 当前批次使用的 OSS 上传器（不对前端暴露凭证）
 }
 
 // BatchTask 批量下载任务
@@ -70,6 +85,7 @@ type BatchTask struct {
 	FavCount     string `json:"favCount,omitempty"`     // 收藏数（字符串格式）
 	ForwardCount string `json:"forwardCount,omitempty"` // 转发数（字符串格式）
 	CreateTime   string `json:"createTime,omitempty"`   // 创建时间
+	CapturedAt   string `json:"capturedAt,omitempty"`   // 数据采集时间（OSS 对象日期优先使用此字段）
 	IPRegion     string `json:"ipRegion,omitempty"`     // IP所在地
 	// 兼容数据库导出格式
 	VideoURL   string `json:"videoUrl,omitempty"`   // 视频URL（数据库格式）
@@ -77,9 +93,21 @@ type BatchTask struct {
 	DecryptKey string `json:"decryptKey,omitempty"` // 解密密钥（数据库格式）
 	DurationMs int64  `json:"durationMs,omitempty"` // 时长毫秒（数据库格式，字段名为duration但类型是int64）
 	Size       int64  `json:"size,omitempty"`       // 大小字节（数据库格式）
-	GopeedTaskID string `json:"-"`
-	TempPath     string `json:"-"`
-	FinalPath    string `json:"-"`
+	// 关联 CSV 导出记录；仅由“勾选 OSS 后导出 CSV”流程设置。
+	ExportRecordID string `json:"exportRecordId,omitempty"`
+	DownloadStatus string `json:"downloadStatus,omitempty"`
+	// OSS 同步上传状态；访问凭证只保存在本地设置中，不进入任务或失败清单。
+	OSSUploadEnabled bool    `json:"ossUploadEnabled,omitempty"`
+	OSSStatus        string  `json:"ossStatus,omitempty"`
+	OSSProgress      float64 `json:"ossProgress,omitempty"`
+	OSSUploadedBytes int64   `json:"ossUploadedBytes,omitempty"`
+	OSSTotalBytes    int64   `json:"ossTotalBytes,omitempty"`
+	OSSObjectKey     string  `json:"ossObjectKey,omitempty"`
+	OSSError         string  `json:"ossError,omitempty"`
+	OSSURL           string  `json:"-"`
+	GopeedTaskID     string  `json:"-"`
+	TempPath         string  `json:"-"`
+	FinalPath        string  `json:"-"`
 }
 
 // GetAuthor 获取作者名称，兼容两种字段
@@ -116,6 +144,9 @@ func (h *BatchHandler) Handle(Conn *SunnyNet.HttpConn) bool {
 		return false
 	}
 
+	if h.HandleBatchOSSConfig(Conn) {
+		return true
+	}
 	// Debug log
 	// utils.Info("BatchHandler checking: %s", Conn.Request.URL.Path)
 
@@ -153,8 +184,41 @@ func NewBatchHandler(cfg *config.Config, gopeedService *services.GopeedService) 
 	return &BatchHandler{
 		downloadService: services.NewDownloadRecordService(),
 		settingsRepo:    database.NewSettingsRepository(),
+		exportRepo:      database.NewExportRecordRepository(),
 		gopeedService:   gopeedService,
 		tasks:           make([]BatchTask, 0),
+	}
+}
+
+func (h *BatchHandler) persistExportTask(task BatchTask) {
+	if h == nil || h.exportRepo == nil || strings.TrimSpace(task.ExportRecordID) == "" || strings.TrimSpace(task.ID) == "" {
+		return
+	}
+	errorMessage := firstNonEmpty(task.OSSError, task.Error)
+	if err := h.exportRepo.UpdateItemProgress(task.ExportRecordID, task.ID, database.ExportItemProgressUpdate{
+		DownloadStatus:   task.DownloadStatus,
+		DownloadProgress: task.Progress,
+		DownloadedMB:     task.DownloadedMB,
+		TotalMB:          task.TotalMB,
+		FileSize:         task.Size,
+		OSSStatus:        task.OSSStatus,
+		OSSProgress:      task.OSSProgress,
+		OSSUploadedBytes: task.OSSUploadedBytes,
+		OSSTotalBytes:    task.OSSTotalBytes,
+		OSSObjectKey:     task.OSSObjectKey,
+		OSSVideoURL:      task.OSSURL,
+		ErrorMessage:     errorMessage,
+	}); err != nil {
+		utils.Warn("更新导出记录进度失败: export=%s video=%s error=%v", task.ExportRecordID, task.ID, err)
+	}
+}
+
+func (h *BatchHandler) markExportFailed(exportRecordID string, err error) {
+	if h == nil || h.exportRepo == nil || strings.TrimSpace(exportRecordID) == "" || err == nil {
+		return
+	}
+	if updateErr := h.exportRepo.MarkFailed(exportRecordID, err.Error()); updateErr != nil {
+		utils.Warn("标记导出记录失败状态失败: export=%s error=%v", exportRecordID, updateErr)
 	}
 }
 
@@ -167,6 +231,145 @@ func (h *BatchHandler) getConfig() *config.Config {
 func (h *BatchHandler) getDownloadsDir() (string, error) {
 	cfg := h.getConfig()
 	return cfg.GetResolvedDownloadsDir()
+}
+
+func (h *BatchHandler) authorizeBatchRequest(Conn *SunnyNet.HttpConn) error {
+	if h.getConfig() != nil && h.getConfig().SecretToken != "" {
+		if Conn.Request.Header.Get("X-Local-Auth") != h.getConfig().SecretToken {
+			return fmt.Errorf("unauthorized")
+		}
+	}
+	return nil
+}
+
+func (h *BatchHandler) loadBatchOSSUploader() (batchOSSUploader, error) {
+	if h.settingsRepo == nil {
+		return nil, fmt.Errorf("本地设置服务未初始化")
+	}
+	accessKeyID, err := h.settingsRepo.Get(database.SettingKeyOSSAccessKeyID)
+	if err != nil {
+		return nil, fmt.Errorf("读取 OSS_ACCESS_KEY_ID 失败: %w", err)
+	}
+	accessKeySecret, err := h.settingsRepo.Get(database.SettingKeyOSSAccessKeySecret)
+	if err != nil {
+		return nil, fmt.Errorf("读取 OSS_ACCESS_KEY_SECRET 失败: %w", err)
+	}
+	uploader, err := services.NewOSSService(services.DefaultBatchOSSSettings(accessKeyID, accessKeySecret))
+	if err != nil {
+		return nil, err
+	}
+	return uploader, nil
+}
+
+// HandleBatchOSSConfig manages the two cached OSS credentials. The secret is
+// never returned to the page; callers only receive a hasSecret marker.
+func (h *BatchHandler) HandleBatchOSSConfig(Conn *SunnyNet.HttpConn) bool {
+	if Conn.Request.URL.Path != "/__wx_channels_api/oss_config" {
+		return false
+	}
+	if Conn.Request.Method == http.MethodOptions {
+		h.sendSuccessResponse(Conn, map[string]interface{}{"message": "OK"})
+		return true
+	}
+	if err := h.authorizeBatchRequest(Conn); err != nil {
+		h.sendErrorResponse(Conn, err)
+		return true
+	}
+	if h.settingsRepo == nil {
+		h.sendErrorResponse(Conn, fmt.Errorf("本地设置服务未初始化"))
+		return true
+	}
+
+	switch Conn.Request.Method {
+	case http.MethodGet:
+		accessKeyID, err := h.settingsRepo.Get(database.SettingKeyOSSAccessKeyID)
+		if err != nil {
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		accessKeySecret, err := h.settingsRepo.Get(database.SettingKeyOSSAccessKeySecret)
+		if err != nil {
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		h.sendSuccessResponse(Conn, map[string]interface{}{
+			"accessKeyId": strings.TrimSpace(accessKeyID),
+			"hasSecret":   strings.TrimSpace(accessKeySecret) != "",
+		})
+		return true
+
+	case http.MethodPost:
+		if Conn.Request.Body == nil {
+			h.sendErrorResponse(Conn, fmt.Errorf("request body is nil"))
+			return true
+		}
+		body, err := io.ReadAll(io.LimitReader(Conn.Request.Body, 64*1024))
+		Conn.Request.Body.Close()
+		if err != nil {
+			h.sendErrorResponse(Conn, fmt.Errorf("读取 OSS 配置失败: %w", err))
+			return true
+		}
+		var req struct {
+			AccessKeyID     string `json:"accessKeyId"`
+			AccessKeySecret string `json:"accessKeySecret"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			h.sendErrorResponse(Conn, fmt.Errorf("解析 OSS 配置失败: %w", err))
+			return true
+		}
+		accessKeyID := strings.TrimSpace(req.AccessKeyID)
+		accessKeySecret := strings.TrimSpace(req.AccessKeySecret)
+		if accessKeySecret == "" {
+			storedAccessKeyID, getErr := h.settingsRepo.Get(database.SettingKeyOSSAccessKeyID)
+			if getErr != nil {
+				h.sendErrorResponse(Conn, getErr)
+				return true
+			}
+			if strings.TrimSpace(storedAccessKeyID) != accessKeyID {
+				h.sendErrorResponse(Conn, fmt.Errorf("OSS_ACCESS_KEY_ID 已变更，请同时填写新的 OSS_ACCESS_KEY_SECRET"))
+				return true
+			}
+			accessKeySecret, err = h.settingsRepo.Get(database.SettingKeyOSSAccessKeySecret)
+			if err != nil {
+				h.sendErrorResponse(Conn, err)
+				return true
+			}
+		}
+		if _, err := services.NewOSSService(services.DefaultBatchOSSSettings(accessKeyID, accessKeySecret)); err != nil {
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		if err := h.settingsRepo.SetOSSConfig(accessKeyID, accessKeySecret); err != nil {
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		h.sendSuccessResponse(Conn, map[string]interface{}{
+			"accessKeyId": accessKeyID,
+			"hasSecret":   true,
+			"saved":       true,
+		})
+		return true
+
+	case http.MethodDelete:
+		if err := h.settingsRepo.DeleteOSSConfig(); err != nil {
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		// 正在运行的批次保留其启动时的上传器快照；空闲时立即清除内存中的凭证。
+		h.mu.Lock()
+		if !h.running && h.cancelFunc == nil {
+			h.ossUploader = nil
+		}
+		h.mu.Unlock()
+		h.sendSuccessResponse(Conn, map[string]interface{}{
+			"cleared": true,
+		})
+		return true
+
+	default:
+		h.sendErrorResponse(Conn, fmt.Errorf("method not allowed: %s", Conn.Request.Method))
+		return true
+	}
 }
 
 func (h *BatchHandler) batchResumeEnabled() bool {
@@ -239,9 +442,11 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	utils.Info("📥 [批量下载] 请求体大小: %.2f MB", float64(bodySize)/(1024*1024))
 
 	var req struct {
-		Videos          []BatchTask `json:"videos"`
-		ForceRedownload bool        `json:"forceRedownload"`
-		PageSource      string      `json:"pageSource,omitempty"` // 页面来源
+		Videos           []BatchTask `json:"videos"`
+		ForceRedownload  bool        `json:"forceRedownload"`
+		OSSUploadEnabled bool        `json:"ossUploadEnabled"`
+		ExportRecordID   string      `json:"exportRecordId"`
+		PageSource       string      `json:"pageSource,omitempty"` // 页面来源
 	}
 
 	utils.Info("📥 [批量下载] 开始解析 JSON...")
@@ -251,6 +456,7 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 		return true
 	}
 	utils.Info("📥 [批量下载] JSON 解析完成，视频数: %d", len(req.Videos))
+	req.ExportRecordID = strings.TrimSpace(req.ExportRecordID)
 
 	// 判断批量下载来源
 	pageSource := req.PageSource
@@ -278,8 +484,63 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	utils.Info("📥 [批量下载] 来源: %s", pageSource)
 
 	if len(req.Videos) == 0 {
-		h.sendErrorResponse(Conn, fmt.Errorf("视频列表为空"))
+		err := fmt.Errorf("视频列表为空")
+		h.markExportFailed(req.ExportRecordID, err)
+		h.sendErrorResponse(Conn, err)
 		return true
+	}
+
+	if req.ExportRecordID != "" {
+		record, recordErr := h.exportRepo.GetByID(req.ExportRecordID)
+		if recordErr != nil {
+			h.markExportFailed(req.ExportRecordID, recordErr)
+			h.sendErrorResponse(Conn, fmt.Errorf("读取关联导出记录失败: %w", recordErr))
+			return true
+		}
+		if record == nil {
+			h.sendErrorResponse(Conn, fmt.Errorf("关联导出记录不存在"))
+			return true
+		}
+		if record.Status != database.ExportStatusProcessing {
+			err := fmt.Errorf("关联导出记录当前不可启动：%s", record.Status)
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		if !req.OSSUploadEnabled || !record.OSSUploadEnabled {
+			err := fmt.Errorf("关联导出记录与 OSS 上传模式不一致")
+			h.markExportFailed(req.ExportRecordID, err)
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		if record.TotalCount != len(req.Videos) {
+			err := fmt.Errorf("关联导出记录的视频数不一致：记录=%d，请求=%d", record.TotalCount, len(req.Videos))
+			h.markExportFailed(req.ExportRecordID, err)
+			h.sendErrorResponse(Conn, err)
+			return true
+		}
+		recordItems, itemsErr := h.exportRepo.ListItems(req.ExportRecordID)
+		if itemsErr != nil {
+			h.markExportFailed(req.ExportRecordID, itemsErr)
+			h.sendErrorResponse(Conn, fmt.Errorf("读取关联导出明细失败: %w", itemsErr))
+			return true
+		}
+		expectedVideoIDs := make(map[string]struct{}, len(recordItems))
+		for _, item := range recordItems {
+			expectedVideoIDs[item.VideoID] = struct{}{}
+		}
+		seenVideoIDs := make(map[string]struct{}, len(req.Videos))
+		for _, video := range req.Videos {
+			videoID := strings.TrimSpace(video.ID)
+			_, expected := expectedVideoIDs[videoID]
+			_, duplicate := seenVideoIDs[videoID]
+			if videoID == "" || !expected || duplicate {
+				err := fmt.Errorf("关联导出记录与下载任务的视频 ID 不一致: %q", videoID)
+				h.markExportFailed(req.ExportRecordID, err)
+				h.sendErrorResponse(Conn, err)
+				return true
+			}
+			seenVideoIDs[videoID] = struct{}{}
+		}
 	}
 
 	h.mu.RLock()
@@ -288,16 +549,30 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	h.mu.RUnlock()
 
 	if busy {
-		h.sendErrorResponse(Conn, fmt.Errorf("已有批量下载任务正在进行或收尾中，请稍后再试"))
+		err := fmt.Errorf("已有批量下载任务正在进行或收尾中，请稍后再试")
+		h.markExportFailed(req.ExportRecordID, err)
+		h.sendErrorResponse(Conn, err)
 		return true
 	}
 	for _, oldTask := range oldTasks {
 		h.cleanupTaskArtifacts(oldTask.GopeedTaskID, oldTask.TempPath, true)
 	}
 
+	var ossUploader batchOSSUploader
+	if req.OSSUploadEnabled {
+		ossUploader, err = h.loadBatchOSSUploader()
+		if err != nil {
+			wrappedErr := fmt.Errorf("OSS 同步上传配置不可用: %w", err)
+			h.markExportFailed(req.ExportRecordID, wrappedErr)
+			h.sendErrorResponse(Conn, wrappedErr)
+			return true
+		}
+	}
+
 	// 初始化任务
 	h.mu.Lock()
 	h.tasks = make([]BatchTask, len(req.Videos))
+	h.ossUploader = ossUploader
 	defaultHeaders := map[string]string{}
 	if origin := strings.TrimSpace(Conn.Request.Header.Get("Origin")); origin != "" {
 		defaultHeaders["Origin"] = origin
@@ -331,21 +606,28 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 			PrefixLen:       v.PrefixLen,
 			FileFormat:      v.FileFormat,
 			Status:          "pending",
+			DownloadStatus:  "pending",
 			// 保留额外字段
-			Duration:     v.Duration,
-			SizeMB:       v.SizeMB,
-			Cover:        v.Cover,
-			Resolution:   v.Resolution,
-			PageSource:   pageSource, // 保存页面来源
-			PlayCount:    v.PlayCount,
-			LikeCount:    v.LikeCount,
-			CommentCount: v.CommentCount,
-			FavCount:     v.FavCount,
-			ForwardCount: v.ForwardCount,
-			CreateTime:   v.CreateTime,
-			IPRegion:     v.IPRegion,
-			DurationMs:   v.DurationMs,
-			Size:         v.Size,
+			Duration:         v.Duration,
+			SizeMB:           v.SizeMB,
+			Cover:            v.Cover,
+			Resolution:       v.Resolution,
+			PageSource:       pageSource, // 保存页面来源
+			PlayCount:        v.PlayCount,
+			LikeCount:        v.LikeCount,
+			CommentCount:     v.CommentCount,
+			FavCount:         v.FavCount,
+			ForwardCount:     v.ForwardCount,
+			CreateTime:       v.CreateTime,
+			CapturedAt:       v.CapturedAt,
+			IPRegion:         v.IPRegion,
+			DurationMs:       v.DurationMs,
+			Size:             v.Size,
+			ExportRecordID:   req.ExportRecordID,
+			OSSUploadEnabled: req.OSSUploadEnabled,
+		}
+		if req.OSSUploadEnabled {
+			h.tasks[i].OSSStatus = "pending"
 		}
 	}
 	h.running = true
@@ -358,13 +640,18 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	}
 
 	utils.Info("🚀 [批量下载] 开始下载 %d 个视频，并发数: %d", len(req.Videos), concurrency)
+	if req.OSSUploadEnabled {
+		utils.Info("☁️ [批量下载] 已启用视频同步上传 OSS")
+	}
 
 	// 启动后台下载
 	go h.startBatchDownload(req.ForceRedownload)
 
 	h.sendSuccessResponse(Conn, map[string]interface{}{
-		"total":       len(req.Videos),
-		"concurrency": concurrency,
+		"total":            len(req.Videos),
+		"concurrency":      concurrency,
+		"ossUploadEnabled": req.OSSUploadEnabled,
+		"exportRecordId":   req.ExportRecordID,
 	})
 	return true
 }
@@ -381,6 +668,7 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 		h.mu.Lock()
 		h.running = false
 		h.cancelFunc = nil
+		h.ossUploader = nil
 		h.mu.Unlock()
 		cancel() // 确保释放资源
 	}()
@@ -389,6 +677,12 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 	downloadsDir, err := h.getDownloadsDir()
 	if err != nil {
 		utils.HandleError(err, "获取下载目录")
+		h.mu.RLock()
+		failedTasks := append([]BatchTask(nil), h.tasks...)
+		h.mu.RUnlock()
+		for _, task := range failedTasks {
+			h.markExportFailed(task.ExportRecordID, err)
+		}
 		return
 	}
 
@@ -421,7 +715,10 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 				h.mu.Lock()
 				task := &h.tasks[taskIdx]
 				task.Status = "downloading"
+				task.DownloadStatus = "downloading"
+				startedSnapshot := *task
 				h.mu.Unlock()
+				h.persistExportTask(startedSnapshot)
 
 				utils.Info("📥 [Worker %d] 开始下载: %s", workerID, task.Title)
 
@@ -433,22 +730,35 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 					if task.Status == "downloading" {
 						task.Status = "pending"
 					}
+					if task.DownloadStatus != "done" {
+						task.DownloadStatus = "paused"
+					}
 					task.Error = ""
+					pausedSnapshot := *task
 					h.mu.Unlock()
+					h.persistExportTask(pausedSnapshot)
 					utils.Info("⏸️ [Worker %d] 已暂停: %s", workerID, task.Title)
 					continue
 				}
 				if err != nil {
 					task.Status = "failed"
+					if task.DownloadStatus != "done" {
+						task.DownloadStatus = "failed"
+					}
 					task.Error = err.Error()
-					task.Progress = 0
+					if task.DownloadStatus == "failed" {
+						task.Progress = 0
+					}
 					utils.Error("❌ [Worker %d] 失败: %s - %v", workerID, task.Title, err)
 				} else {
 					task.Status = "done"
+					task.DownloadStatus = "done"
 					task.Progress = 100
 					utils.Info("✅ [Worker %d] 完成: %s", workerID, task.Title)
 				}
+				finishedSnapshot := *task
 				h.mu.Unlock()
+				h.persistExportTask(finishedSnapshot)
 			}
 		}(w)
 	}
@@ -499,6 +809,203 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 	h.mu.RUnlock()
 
 	utils.Info("✅ [批量下载] 全部完成！成功: %d, 失败: %d", done, failed)
+	h.mu.RLock()
+	finalTasks := append([]BatchTask(nil), h.tasks...)
+	h.mu.RUnlock()
+	for exportRecordID := range collectBatchExportRecordIDs(finalTasks) {
+		if h.exportRepo != nil {
+			if err := h.exportRepo.RefreshStatus(exportRecordID); err != nil {
+				utils.Warn("刷新导出记录最终状态失败: export=%s error=%v", exportRecordID, err)
+			}
+		}
+	}
+}
+
+func collectBatchExportRecordIDs(tasks []BatchTask) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, task := range tasks {
+		if id := strings.TrimSpace(task.ExportRecordID); id != "" {
+			ids[id] = struct{}{}
+		}
+	}
+	return ids
+}
+
+func (h *BatchHandler) uploadBatchTaskToOSS(ctx context.Context, task *BatchTask, filePath string) error {
+	if task == nil || !task.OSSUploadEnabled {
+		return nil
+	}
+	h.mu.RLock()
+	uploader := h.ossUploader
+	h.mu.RUnlock()
+	if uploader == nil {
+		err := fmt.Errorf("OSS 上传器未初始化，请重新保存 OSS 配置后重试")
+		h.mu.Lock()
+		task.OSSStatus = "failed"
+		task.OSSError = err.Error()
+		snapshot := *task
+		h.mu.Unlock()
+		h.persistExportTask(snapshot)
+		return err
+	}
+
+	scrapedDate := parseBatchCreateTime(firstNonEmpty(task.CapturedAt, task.CreateTime))
+	objectKey, err := services.BuildOSSObjectKey(task.ID, services.DefaultOSSObjectPrefix, scrapedDate)
+	if err != nil {
+		h.mu.Lock()
+		task.OSSStatus = "failed"
+		task.OSSError = err.Error()
+		snapshot := *task
+		h.mu.Unlock()
+		h.persistExportTask(snapshot)
+		return err
+	}
+	h.mu.Lock()
+	task.OSSObjectKey = objectKey
+	task.OSSStatus = "uploading"
+	task.OSSProgress = 0
+	task.OSSUploadedBytes = 0
+	task.OSSError = ""
+	if stat, statErr := os.Stat(filePath); statErr == nil {
+		task.OSSTotalBytes = stat.Size()
+		task.Size = stat.Size()
+	}
+	uploadingSnapshot := *task
+	h.mu.Unlock()
+	h.persistExportTask(uploadingSnapshot)
+
+	lastPersistedPercent := -1
+	lastPersistedAt := time.Time{}
+	onProgress := func(uploaded, total int64) {
+		progress := float64(0)
+		if total > 0 {
+			progress = float64(uploaded) / float64(total) * 100
+			if progress > 100 {
+				progress = 100
+			}
+		}
+		now := time.Now()
+		percent := int(progress)
+		h.mu.Lock()
+		task.OSSUploadedBytes = uploaded
+		task.OSSTotalBytes = total
+		task.OSSProgress = progress
+		if total > 0 {
+			task.Size = total
+		}
+		shouldPersist := percent >= lastPersistedPercent+1 || now.Sub(lastPersistedAt) >= time.Second || uploaded == total
+		progressSnapshot := *task
+		h.mu.Unlock()
+		if shouldPersist {
+			lastPersistedPercent = percent
+			lastPersistedAt = now
+			h.persistExportTask(progressSnapshot)
+		}
+	}
+
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return errBatchPaused
+		default:
+		}
+
+		if attempt > 1 {
+			delay := time.Duration(1<<uint(attempt-1)) * time.Second
+			h.mu.Lock()
+			task.OSSStatus = "retrying"
+			retrySnapshot := *task
+			h.mu.Unlock()
+			h.persistExportTask(retrySnapshot)
+			utils.Warn("☁️ [OSS] 等待 %v 后重试 (%d/%d): %s", delay, attempt, maxRetries, task.Title)
+			select {
+			case <-ctx.Done():
+				return errBatchPaused
+			case <-time.After(delay):
+			}
+			h.mu.Lock()
+			task.OSSStatus = "uploading"
+			task.OSSProgress = 0
+			task.OSSUploadedBytes = 0
+			uploadRetrySnapshot := *task
+			h.mu.Unlock()
+			h.persistExportTask(uploadRetrySnapshot)
+		}
+
+		utils.Info("☁️ [OSS] 开始同步上传: %s -> %s", task.Title, objectKey)
+		var result services.OSSUploadResult
+		var uploadErr error
+		if progressUploader, ok := uploader.(batchOSSProgressUploader); ok {
+			result, uploadErr = progressUploader.UploadVideoWithProgress(ctx, filePath, task.ID, scrapedDate, onProgress)
+		} else {
+			result, uploadErr = uploader.UploadVideo(ctx, filePath, task.ID, scrapedDate)
+		}
+		if uploadErr == nil {
+			h.mu.Lock()
+			task.OSSStatus = "done"
+			task.OSSProgress = 100
+			task.OSSUploadedBytes = result.SizeBytes
+			task.OSSTotalBytes = result.SizeBytes
+			if result.SizeBytes > 0 {
+				task.Size = result.SizeBytes
+				task.TotalMB = float64(result.SizeBytes) / (1024 * 1024)
+				task.DownloadedMB = task.TotalMB
+			}
+			task.OSSObjectKey = result.ObjectKey
+			task.OSSURL = result.URL
+			task.OSSError = ""
+			doneSnapshot := *task
+			h.mu.Unlock()
+			h.persistExportTask(doneSnapshot)
+			utils.Info("✅ [OSS] 上传并校验完成: %s", result.ObjectKey)
+			return nil
+		}
+		if ctx.Err() != nil {
+			h.mu.Lock()
+			task.OSSStatus = "paused"
+			pausedSnapshot := *task
+			h.mu.Unlock()
+			h.persistExportTask(pausedSnapshot)
+			return errBatchPaused
+		}
+		lastErr = uploadErr
+		h.mu.Lock()
+		task.OSSError = uploadErr.Error()
+		errorSnapshot := *task
+		h.mu.Unlock()
+		h.persistExportTask(errorSnapshot)
+		utils.Warn("⚠️ [OSS] 上传失败 (%d/%d): %s - %v", attempt, maxRetries, task.Title, uploadErr)
+	}
+
+	h.mu.Lock()
+	task.OSSStatus = "failed"
+	failedSnapshot := *task
+	h.mu.Unlock()
+	h.persistExportTask(failedSnapshot)
+	return fmt.Errorf("OSS 同步上传失败（已重试 %d 次）: %w", maxRetries, lastErr)
+}
+
+func (h *BatchHandler) markBatchTaskDownloadDone(task *BatchTask, filePath string) {
+	if task == nil {
+		return
+	}
+	var size int64
+	if stat, err := os.Stat(filePath); err == nil {
+		size = stat.Size()
+	}
+	h.mu.Lock()
+	task.DownloadStatus = "done"
+	task.Progress = 100
+	if size > 0 {
+		task.Size = size
+		task.TotalMB = float64(size) / (1024 * 1024)
+		task.DownloadedMB = task.TotalMB
+	}
+	snapshot := *task
+	h.mu.Unlock()
+	h.persistExportTask(snapshot)
 }
 
 // downloadVideo 下载单个视频（带重试和断点续传）
@@ -523,10 +1030,28 @@ func (h *BatchHandler) downloadVideo(ctx context.Context, task *BatchTask, downl
 		filenameTemplate = cfg.DownloadFilenameTemplate
 	}
 
+	// 如果取消发生在本地文件已完成、OSS 上传尚未完成的阶段，继续任务时直接
+	// 复用已解密的视频，避免再次下载并产生重复文件。
+	if !forceRedownload && task.OSSUploadEnabled && task.OSSStatus != "done" && strings.TrimSpace(task.FinalPath) != "" {
+		if stat, statErr := os.Stat(task.FinalPath); statErr == nil && stat.Mode().IsRegular() && stat.Size() > 0 {
+			utils.Info("☁️ [批量下载] 复用已下载文件继续上传 OSS: %s", task.Title)
+			h.markBatchTaskDownloadDone(task, task.FinalPath)
+			if err := h.uploadBatchTaskToOSS(ctx, task, task.FinalPath); err != nil {
+				return err
+			}
+			h.saveDownloadRecord(task, task.FinalPath, "completed")
+			return nil
+		}
+	}
+
 	if !forceRedownload && task.ID != "" && h.downloadService != nil {
 		if exists, err := h.downloadService.GetByID(task.ID); err == nil && exists != nil && exists.FilePath != "" {
 			if _, statErr := os.Stat(exists.FilePath); statErr == nil {
 				utils.Info("⏭️ [批量下载] 视频已存在，跳过: ID=%s", task.ID)
+				h.markBatchTaskDownloadDone(task, exists.FilePath)
+				if err := h.uploadBatchTaskToOSS(ctx, task, exists.FilePath); err != nil {
+					return err
+				}
 				h.saveDownloadRecord(task, exists.FilePath, "completed")
 				return nil
 			}
@@ -600,6 +1125,10 @@ func (h *BatchHandler) downloadVideo(ctx context.Context, task *BatchTask, downl
 		cancel()
 
 		if err == nil {
+			h.markBatchTaskDownloadDone(task, actualPath)
+			if err := h.uploadBatchTaskToOSS(ctx, task, actualPath); err != nil {
+				return err
+			}
 			// 下载成功，保存到下载记录数据库
 			h.saveDownloadRecord(task, actualPath, "completed")
 			return nil
@@ -637,9 +1166,12 @@ func (h *BatchHandler) downloadVideoOnce(ctx context.Context, task *BatchTask, d
 	}
 	tmpPath := task.TempPath
 
+	lastPersistedDownloadPercent := -1
+	lastPersistedDownloadAt := time.Time{}
 	onProgress := func(progress float64, downloaded int64, total int64) {
 		h.mu.Lock()
-		defer h.mu.Unlock()
+		shouldPersist := false
+		var progressSnapshot BatchTask
 
 		// 确保任务索引有效
 		if taskIdx >= 0 && taskIdx < len(h.tasks) {
@@ -647,9 +1179,13 @@ func (h *BatchHandler) downloadVideoOnce(ctx context.Context, task *BatchTask, d
 
 			// 只在下载中状态更新，避免覆盖完成状态
 			if task.Status == "downloading" {
+				task.DownloadStatus = "downloading"
 				task.Progress = progress * 100 // 转换为百分比
 				task.DownloadedMB = float64(downloaded) / (1024 * 1024)
 				task.TotalMB = float64(total) / (1024 * 1024)
+				if total > 0 {
+					task.Size = total
+				}
 				// 也可以根据需要计算 SizeMB 字符串
 				if total > 0 {
 					task.SizeMB = fmt.Sprintf("%.2fMB", task.TotalMB)
@@ -660,7 +1196,20 @@ func (h *BatchHandler) downloadVideoOnce(ctx context.Context, task *BatchTask, d
 					utils.Info("📊 [批量下载] %s 进度: %.1f%% (%.2f/%.2f MB)",
 						task.Title, task.Progress, task.DownloadedMB, task.TotalMB)
 				}
+				now := time.Now()
+				percent := int(task.Progress)
+				shouldPersist = percent >= lastPersistedDownloadPercent+1 ||
+					now.Sub(lastPersistedDownloadAt) >= time.Second || downloaded == total
+				if shouldPersist {
+					lastPersistedDownloadPercent = percent
+					lastPersistedDownloadAt = now
+					progressSnapshot = *task
+				}
 			}
+		}
+		h.mu.Unlock()
+		if shouldPersist {
+			h.persistExportTask(progressSnapshot)
 		}
 	}
 
@@ -998,14 +1547,24 @@ func (h *BatchHandler) HandleBatchProgress(Conn *SunnyNet.HttpConn) bool {
 
 	for _, t := range h.tasks {
 		taskInfo := map[string]interface{}{
-			"id":           t.ID,
-			"title":        t.Title,
-			"authorName":   t.GetAuthor(),
-			"status":       t.Status,
-			"progress":     t.Progress,
-			"downloadedMB": t.DownloadedMB,
-			"totalMB":      t.TotalMB,
-			"error":        t.Error,
+			"id":               t.ID,
+			"title":            t.Title,
+			"authorName":       t.GetAuthor(),
+			"status":           t.Status,
+			"downloadStatus":   t.DownloadStatus,
+			"progress":         t.Progress,
+			"downloadedMB":     t.DownloadedMB,
+			"totalMB":          t.TotalMB,
+			"error":            t.Error,
+			"exportRecordId":   t.ExportRecordID,
+			"ossUploadEnabled": t.OSSUploadEnabled,
+			"ossStatus":        t.OSSStatus,
+			"ossProgress":      t.OSSProgress,
+			"ossUploadedBytes": t.OSSUploadedBytes,
+			"ossTotalBytes":    t.OSSTotalBytes,
+			"ossObjectKey":     t.OSSObjectKey,
+			"ossUrl":           t.OSSURL,
+			"ossError":         t.OSSError,
 		}
 		allTasks = append(allTasks, taskInfo)
 
@@ -1068,12 +1627,20 @@ func (h *BatchHandler) HandleBatchCancel(Conn *SunnyNet.HttpConn) bool {
 	cancel := h.cancelFunc
 	resumeEnabled := h.batchResumeEnabled()
 	taskIDs := make([]string, 0)
+	pausedTasks := make([]BatchTask, 0)
 	if h.running && cancel != nil {
 		h.running = false
 		for i := range h.tasks {
 			if h.tasks[i].Status == "downloading" {
 				h.tasks[i].Status = "pending"
+				if h.tasks[i].DownloadStatus != "done" {
+					h.tasks[i].DownloadStatus = "paused"
+				}
+				if h.tasks[i].OSSUploadEnabled && h.tasks[i].OSSStatus != "done" && h.tasks[i].OSSStatus != "failed" {
+					h.tasks[i].OSSStatus = "paused"
+				}
 				h.tasks[i].Error = ""
+				pausedTasks = append(pausedTasks, h.tasks[i])
 				if resumeEnabled && strings.TrimSpace(h.tasks[i].GopeedTaskID) != "" {
 					taskIDs = append(taskIDs, h.tasks[i].GopeedTaskID)
 				}
@@ -1081,6 +1648,9 @@ func (h *BatchHandler) HandleBatchCancel(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 	h.mu.Unlock()
+	for _, task := range pausedTasks {
+		h.persistExportTask(task)
+	}
 
 	if resumeEnabled {
 		for _, taskID := range taskIDs {
@@ -1195,9 +1765,11 @@ func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
 	// 检查是否有待处理的任务
 	// 包括 pending 状态的任务，以及 failed 状态但错误为"下载已取消"的任务
 	pendingCount := 0
+	ossUploadNeeded := false
 	for i := range h.tasks {
 		if h.tasks[i].Status == "pending" {
 			pendingCount++
+			ossUploadNeeded = ossUploadNeeded || h.tasks[i].OSSUploadEnabled
 		} else if h.tasks[i].Status == "failed" && h.tasks[i].Error == "下载已取消" {
 			// 将因取消而失败的任务重置为 pending 状态，以便继续下载
 			// 注意：保留进度以支持断点续传
@@ -1205,6 +1777,7 @@ func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
 			h.tasks[i].Error = ""
 			// 不重置进度，保留已下载的进度以支持断点续传
 			pendingCount++
+			ossUploadNeeded = ossUploadNeeded || h.tasks[i].OSSUploadEnabled
 		}
 	}
 
@@ -1217,6 +1790,14 @@ func (h *BatchHandler) HandleBatchResume(Conn *SunnyNet.HttpConn) bool {
 	if h.running || h.cancelFunc != nil {
 		h.sendErrorResponse(Conn, fmt.Errorf("下载正在进行中或上一轮仍在收尾，无法继续"))
 		return true
+	}
+	if ossUploadNeeded {
+		uploader, err := h.loadBatchOSSUploader()
+		if err != nil {
+			h.sendErrorResponse(Conn, fmt.Errorf("OSS 同步上传配置不可用: %w", err))
+			return true
+		}
+		h.ossUploader = uploader
 	}
 
 	// 读取请求体获取 forceRedownload 参数
@@ -1292,12 +1873,16 @@ func (h *BatchHandler) HandleBatchClear(Conn *SunnyNet.HttpConn) bool {
 	oldTasks := append([]BatchTask(nil), h.tasks...)
 	taskCount := len(h.tasks)
 	h.tasks = nil
+	h.ossUploader = nil
 	h.mu.Unlock()
 
 	utils.Info("🗑️ [批量下载] 已清除所有任务（%d 个）", taskCount)
 
 	for _, oldTask := range oldTasks {
 		h.cleanupTaskArtifacts(oldTask.GopeedTaskID, oldTask.TempPath, true)
+	}
+	for exportRecordID := range collectBatchExportRecordIDs(oldTasks) {
+		h.markExportFailed(exportRecordID, fmt.Errorf("关联的批量下载及 OSS 上传任务已清除"))
 	}
 
 	h.sendSuccessResponse(Conn, map[string]interface{}{
@@ -1323,7 +1908,7 @@ func (h *BatchHandler) sendSuccessResponse(Conn *SunnyNet.HttpConn, data interfa
 					headers.Set("Access-Control-Allow-Origin", origin)
 					headers.Set("Vary", "Origin")
 					headers.Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Auth")
-					headers.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+					headers.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 					break
 				}
 			}
@@ -1346,7 +1931,7 @@ func (h *BatchHandler) sendErrorResponse(Conn *SunnyNet.HttpConn, err error) {
 					headers.Set("Access-Control-Allow-Origin", origin)
 					headers.Set("Vary", "Origin")
 					headers.Set("Access-Control-Allow-Headers", "Content-Type, X-Local-Auth")
-					headers.Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+					headers.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 					break
 				}
 			}

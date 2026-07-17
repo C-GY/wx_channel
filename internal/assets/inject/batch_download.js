@@ -4,6 +4,17 @@
  */
 console.log('[batch_download.js] 加载通用批量下载模块');
 
+var __wx_batch_default_oss_access_key_id__ = 'marketing-video-dashboard';
+
+// 为互动数据快照记录首次进入批量列表的时间。
+function __ensure_batch_video_captured_at__(video, capturedAt) {
+  if (!video || typeof video !== 'object') return video;
+  if (!video.capturedAt) {
+    video.capturedAt = capturedAt || new Date().toISOString();
+  }
+  return video;
+}
+
 // ==================== 通用批量下载管理器 ====================
 window.__wx_batch_download_manager__ = {
   videos: [], // 当前视频列表
@@ -17,11 +28,20 @@ window.__wx_batch_download_manager__ = {
   isDownloading: false, // 是否正在下载
   stopSignal: false, // 取消下载信号
   forceRedownload: false, // 强制重新下载
+  ossUploadEnabled: false, // 下载完成后同步上传 OSS
+  ossAccessKeyId: __wx_batch_default_oss_access_key_id__, // 默认值或已缓存的 AccessKey ID
+  ossSavedAccessKeyId: '',
+  ossHasSavedSecret: false,
+  ossConfigLoaded: false,
+  ossConfigLoadPromise: null,
   abortController: null, // 当前请求的 AbortController
 
   // 设置视频数据
   setVideos: function (videos, title) {
-    this.videos = videos.slice(0, this.maxItems); // 限制最多300个
+    var capturedAt = new Date().toISOString();
+    this.videos = videos.slice(0, this.maxItems).map(function (video) {
+      return __ensure_batch_video_captured_at__(video, capturedAt);
+    });
     this.selectedItems = {};
     this.currentPage = 1;
     if (title) this.title = title;
@@ -36,8 +56,9 @@ window.__wx_batch_download_manager__ = {
     });
 
     var newCount = 0;
+    var capturedAt = new Date().toISOString();
     for (var i = 0; i < videos.length && this.videos.length < this.maxItems; i++) {
-      var video = videos[i];
+      var video = __ensure_batch_video_captured_at__(videos[i], capturedAt);
       if (video.id && !existingIds[video.id]) {
         this.videos.push(video);
         existingIds[video.id] = true;
@@ -95,6 +116,215 @@ function __wx_channels_batch_api_headers__() {
   return headers;
 }
 
+function __set_batch_oss_status__(message, isError) {
+  var status = document.getElementById('batch-oss-config-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = isError ? '#fa5151' : '#07c160';
+}
+
+function __set_batch_oss_panel_visible__(visible) {
+  __wx_batch_download_manager__.ossUploadEnabled = !!visible;
+  var panel = document.getElementById('batch-oss-config-panel');
+  if (panel) panel.style.display = visible ? 'block' : 'none';
+  var checkbox = document.getElementById('batch-oss-upload-enabled');
+  if (checkbox) checkbox.checked = !!visible;
+}
+
+function __batch_oss_response_error__(result, fallbackMessage) {
+  if (!result) return fallbackMessage;
+  return result.error || result.message || fallbackMessage;
+}
+
+// 从本地后端读取缓存配置。出于安全考虑，后端只返回是否已保存 Secret，
+// 不会把 Secret 明文重新注入视频号页面。
+async function __load_batch_oss_config__() {
+  var accessKeyIdInput = document.getElementById('batch-oss-access-key-id');
+  var accessKeySecretInput = document.getElementById('batch-oss-access-key-secret');
+  if (!accessKeyIdInput || !accessKeySecretInput) return;
+  var initialAccessKeyId = accessKeyIdInput.value.trim();
+
+  __wx_batch_download_manager__.ossConfigLoaded = false;
+  __set_batch_oss_status__('正在读取本地 OSS 配置...', false);
+  try {
+    var response = await fetch('/__wx_channels_api/oss_config', {
+      method: 'GET',
+      headers: __wx_channels_batch_api_headers__()
+    });
+    var result = await response.json();
+    if (!response.ok || (typeof result.code === 'number' && result.code !== 0)) {
+      throw new Error(__batch_oss_response_error__(result, '读取 OSS 配置失败'));
+    }
+
+    var data = result.data || result;
+    var accessKeyId = String(data.accessKeyId || '').trim();
+    var effectiveAccessKeyId = accessKeyId || __wx_batch_default_oss_access_key_id__;
+    var hasSecret = !!data.hasSecret;
+    __wx_batch_download_manager__.ossAccessKeyId = effectiveAccessKeyId;
+    __wx_batch_download_manager__.ossSavedAccessKeyId = accessKeyId;
+    __wx_batch_download_manager__.ossHasSavedSecret = hasSecret;
+    __wx_batch_download_manager__.ossConfigLoaded = true;
+    // 本地读取期间用户可能已开始输入，不能用旧缓存覆盖新输入。
+    var currentAccessKeyId = accessKeyIdInput.value.trim();
+    var initialValueWasDefault = !initialAccessKeyId ||
+      initialAccessKeyId === __wx_batch_default_oss_access_key_id__;
+    if (!currentAccessKeyId ||
+        (initialValueWasDefault && currentAccessKeyId === initialAccessKeyId)) {
+      accessKeyIdInput.value = effectiveAccessKeyId;
+    }
+    accessKeySecretInput.placeholder = hasSecret
+      ? '已保存在本地，留空即可沿用'
+      : '请输入 OSS_ACCESS_KEY_SECRET';
+    __set_batch_oss_status__(accessKeyId && hasSecret ? '已加载本地保存的 OSS 配置' : '', false);
+  } catch (err) {
+    __wx_batch_download_manager__.ossConfigLoaded = true;
+    __set_batch_oss_status__('读取失败：' + (err.message || err), true);
+    console.warn('[批量下载] 读取 OSS 配置失败:', err);
+  }
+}
+
+// 勾选 OSS 时保存配置。Secret 输入框留空代表继续使用后端已缓存的 Secret。
+async function __persist_batch_oss_config_if_needed__() {
+  var checkbox = document.getElementById('batch-oss-upload-enabled');
+  if (!checkbox || !checkbox.checked) {
+    __wx_batch_download_manager__.ossUploadEnabled = false;
+    return { enabled: false };
+  }
+
+  __wx_batch_download_manager__.ossUploadEnabled = true;
+  if (!__wx_batch_download_manager__.ossConfigLoaded &&
+      __wx_batch_download_manager__.ossConfigLoadPromise) {
+    await __wx_batch_download_manager__.ossConfigLoadPromise;
+  }
+  var accessKeyIdInput = document.getElementById('batch-oss-access-key-id');
+  var accessKeySecretInput = document.getElementById('batch-oss-access-key-secret');
+  var accessKeyId = accessKeyIdInput ? accessKeyIdInput.value.trim() : '';
+  var accessKeySecret = accessKeySecretInput ? accessKeySecretInput.value.trim() : '';
+
+  if (!accessKeyId) {
+    __set_batch_oss_status__('请填写 OSS_ACCESS_KEY_ID', true);
+    if (accessKeyIdInput) accessKeyIdInput.focus();
+    return null;
+  }
+  var canReuseSavedSecret = __wx_batch_download_manager__.ossHasSavedSecret &&
+    accessKeyId === __wx_batch_download_manager__.ossSavedAccessKeyId;
+  if (!accessKeySecret && !canReuseSavedSecret) {
+    __set_batch_oss_status__('请填写 OSS_ACCESS_KEY_SECRET', true);
+    if (accessKeySecretInput) accessKeySecretInput.focus();
+    return null;
+  }
+
+  __set_batch_oss_status__('正在保存 OSS 配置...', false);
+  try {
+    var response = await fetch('/__wx_channels_api/oss_config', {
+      method: 'POST',
+      headers: __wx_channels_batch_api_headers__(),
+      body: JSON.stringify({
+        accessKeyId: accessKeyId,
+        accessKeySecret: accessKeySecret
+      })
+    });
+    var result = await response.json();
+    if (!response.ok || (typeof result.code === 'number' && result.code !== 0)) {
+      throw new Error(__batch_oss_response_error__(result, '保存 OSS 配置失败'));
+    }
+
+    __wx_batch_download_manager__.ossAccessKeyId = accessKeyId;
+    __wx_batch_download_manager__.ossSavedAccessKeyId = accessKeyId;
+    __wx_batch_download_manager__.ossHasSavedSecret = true;
+    __wx_batch_download_manager__.ossConfigLoaded = true;
+    if (accessKeySecretInput) {
+      accessKeySecretInput.value = '';
+      accessKeySecretInput.placeholder = '已保存在本地，留空即可沿用';
+    }
+    __set_batch_oss_status__('OSS 配置已保存到本地', false);
+    return { enabled: true };
+  } catch (err) {
+    __set_batch_oss_status__('保存失败：' + (err.message || err), true);
+    __wx_log({ msg: '❌ OSS 配置保存失败：' + (err.message || err) });
+    return null;
+  }
+}
+
+async function __clear_batch_oss_config__() {
+  var clearButton = document.getElementById('batch-oss-clear-config');
+  if (clearButton) clearButton.disabled = true;
+  __set_batch_oss_status__('正在清除 OSS 配置...', false);
+  try {
+    var response = await fetch('/__wx_channels_api/oss_config', {
+      method: 'DELETE',
+      headers: __wx_channels_batch_api_headers__()
+    });
+    var result = await response.json();
+    if (!response.ok || (typeof result.code === 'number' && result.code !== 0)) {
+      throw new Error(__batch_oss_response_error__(result, '清除 OSS 配置失败'));
+    }
+
+    __wx_batch_download_manager__.ossAccessKeyId = __wx_batch_default_oss_access_key_id__;
+    __wx_batch_download_manager__.ossSavedAccessKeyId = '';
+    __wx_batch_download_manager__.ossHasSavedSecret = false;
+    __wx_batch_download_manager__.ossConfigLoaded = true;
+    var accessKeyIdInput = document.getElementById('batch-oss-access-key-id');
+    var accessKeySecretInput = document.getElementById('batch-oss-access-key-secret');
+    if (accessKeyIdInput) accessKeyIdInput.value = __wx_batch_default_oss_access_key_id__;
+    if (accessKeySecretInput) {
+      accessKeySecretInput.value = '';
+      accessKeySecretInput.placeholder = '请输入 OSS_ACCESS_KEY_SECRET';
+    }
+    __set_batch_oss_status__('OSS 配置已清除', false);
+    __wx_log({ msg: '🧹 已清除本地 OSS 配置' });
+  } catch (err) {
+    __set_batch_oss_status__('清除失败：' + (err.message || err), true);
+    __wx_log({ msg: '❌ OSS 配置清除失败：' + (err.message || err) });
+  } finally {
+    if (clearButton) clearButton.disabled = false;
+  }
+}
+
+function __merge_batch_oss_task_results__(tasks) {
+  if (!Array.isArray(tasks) || tasks.length === 0) return 0;
+  var videosById = {};
+  __wx_batch_download_manager__.videos.forEach(function (video) {
+    if (video && video.id !== undefined && video.id !== null) {
+      videosById[String(video.id)] = video;
+    }
+  });
+
+  var readyCount = 0;
+  tasks.forEach(function (task) {
+    if (!task || task.id === undefined || task.id === null) return;
+    var video = videosById[String(task.id)];
+    if (!video) return;
+    video.ossUploadStatus = task.ossStatus || '';
+    video.ossObjectKey = task.ossObjectKey || '';
+    video.ossUploadError = task.ossError || '';
+    if (task.ossUrl) {
+      video.ossVideoUrl = task.ossUrl;
+      readyCount++;
+    } else if (Object.prototype.hasOwnProperty.call(task, 'ossUploadEnabled')) {
+      video.ossVideoUrl = '';
+    }
+  });
+  return readyCount;
+}
+
+async function __refresh_batch_oss_task_results__() {
+  try {
+    var response = await fetch('/__wx_channels_api/batch_progress', {
+      method: 'POST',
+      headers: __wx_channels_batch_api_headers__()
+    });
+    if (!response.ok) return 0;
+    var result = await response.json();
+    if (typeof result.code === 'number' && result.code !== 0) return 0;
+    var data = result.data || result;
+    return __merge_batch_oss_task_results__(data.tasks || []);
+  } catch (err) {
+    console.warn('[批量下载] 读取 OSS 上传结果失败:', err);
+    return 0;
+  }
+}
+
 // ==================== 显示批量下载弹窗 ====================
 function __show_batch_download_ui__(videos, title) {
   if (!videos || videos.length === 0) {
@@ -112,7 +342,7 @@ function __show_batch_download_ui__(videos, title) {
   // 创建弹窗
   var ui = document.createElement('div');
   ui.id = 'wx-batch-download-ui';
-  ui.style.cssText = 'position:fixed;top:60px;right:20px;background:#2b2b2b;color:#e5e5e5;padding:0;border-radius:8px;z-index:99999;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:14px;width:450px;max-height:80vh;box-shadow:0 8px 24px rgba(0,0,0,0.5);overflow:hidden;';
+  ui.style.cssText = 'position:fixed;top:60px;right:20px;background:#2b2b2b;color:#e5e5e5;padding:0;border-radius:8px;z-index:99999;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:14px;width:450px;max-height:80vh;box-shadow:0 8px 24px rgba(0,0,0,0.5);overflow-y:auto;overflow-x:hidden;';
 
   // 统计视频和直播数量
   var videoCount = 0;
@@ -207,11 +437,29 @@ function __show_batch_download_ui__(videos, title) {
     '<input type="checkbox" id="batch-force-redownload" style="margin-right:8px;cursor:pointer;" />' +
     '<span>强制重新下载</span>' +
     '</label>' +
+
+    // OSS 同步上传选项
+    '<label style="display:flex;align-items:center;cursor:pointer;font-size:13px;color:#999;user-select:none;margin-top:10px;">' +
+    '<input type="checkbox" id="batch-oss-upload-enabled" style="margin-right:8px;cursor:pointer;" />' +
+    '<span>视频同步上传OSS</span>' +
+    '</label>' +
+    '<div id="batch-oss-config-panel" style="display:none;margin-top:10px;padding:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;">' +
+    '<label for="batch-oss-access-key-id" style="display:block;font-size:12px;color:#aaa;margin-bottom:5px;">OSS_ACCESS_KEY_ID</label>' +
+    '<input type="text" id="batch-oss-access-key-id" maxlength="256" autocomplete="off" spellcheck="false" value="marketing-video-dashboard" style="box-sizing:border-box;width:100%;margin-bottom:10px;background:#202020;color:#fff;border:1px solid rgba(255,255,255,0.14);padding:7px 9px;border-radius:4px;font-size:12px;outline:none;" placeholder="请输入 OSS_ACCESS_KEY_ID" />' +
+    '<label for="batch-oss-access-key-secret" style="display:block;font-size:12px;color:#aaa;margin-bottom:5px;">OSS_ACCESS_KEY_SECRET</label>' +
+    '<input type="password" id="batch-oss-access-key-secret" maxlength="1024" autocomplete="new-password" spellcheck="false" style="box-sizing:border-box;width:100%;margin-bottom:10px;background:#202020;color:#fff;border:1px solid rgba(255,255,255,0.14);padding:7px 9px;border-radius:4px;font-size:12px;outline:none;" placeholder="请输入 OSS_ACCESS_KEY_SECRET" />' +
+    '<div style="font-size:11px;line-height:1.5;color:#777;margin-bottom:9px;">开始下载后会同步上传；导出CSV会保存配置，并写入已完成的OSS视频地址。</div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
+    '<span id="batch-oss-config-status" style="flex:1;font-size:11px;line-height:1.4;color:#07c160;"></span>' +
+    '<button type="button" id="batch-oss-clear-config" style="flex:none;background:transparent;color:#fa5151;border:1px solid rgba(250,81,81,0.45);padding:5px 9px;border-radius:4px;cursor:pointer;font-size:11px;">清除OSS配置</button>' +
+    '</div>' +
+    '</div>' +
     '</div>' +
 
     // 次要操作区
     '<div style="padding:12px 20px;border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:8px;">' +
-    '<button id="batch-export-btn" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出列表</button>' +
+    '<button id="batch-export-btn" title="有勾选项时导出勾选项，否则导出全部" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出 JSON</button>' +
+    '<button id="batch-export-csv-btn" title="导出视频信息及点赞、评论、收藏、转发数据" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">导出 CSV</button>' +
     '<button id="batch-clear-btn" style="flex:1;background:transparent;color:#999;border:1px solid rgba(255,255,255,0.12);padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;transition:all 0.2s;">清空列表</button>' +
     '</div>';
 
@@ -260,6 +508,23 @@ function __show_batch_download_ui__(videos, title) {
       __wx_batch_download_manager__.forceRedownload = this.checked;
     };
 
+    // OSS 同步上传与本地配置
+    var ossUploadCheckbox = document.getElementById('batch-oss-upload-enabled');
+    if (ossUploadCheckbox) {
+      ossUploadCheckbox.checked = __wx_batch_download_manager__.ossUploadEnabled;
+      ossUploadCheckbox.onchange = function () {
+        __set_batch_oss_panel_visible__(this.checked);
+      };
+      __set_batch_oss_panel_visible__(ossUploadCheckbox.checked);
+    }
+    var clearOSSConfigBtn = document.getElementById('batch-oss-clear-config');
+    if (clearOSSConfigBtn) {
+      clearOSSConfigBtn.onclick = function () {
+        __clear_batch_oss_config__();
+      };
+    }
+    __wx_batch_download_manager__.ossConfigLoadPromise = __load_batch_oss_config__();
+
     // 导出列表
     var exportBtn = document.getElementById('batch-export-btn');
     if (exportBtn) {
@@ -273,6 +538,22 @@ function __show_batch_download_ui__(videos, title) {
       });
       exportBtn.addEventListener('click', function () {
         __export_batch_video_list__();
+      });
+    }
+
+    // 导出 CSV（互动数据快照）
+    var exportCsvBtn = document.getElementById('batch-export-csv-btn');
+    if (exportCsvBtn) {
+      exportCsvBtn.addEventListener('mouseenter', function () {
+        this.style.background = 'rgba(255,255,255,0.08)';
+        this.style.color = '#fff';
+      });
+      exportCsvBtn.addEventListener('mouseleave', function () {
+        this.style.background = 'transparent';
+        this.style.color = '#999';
+      });
+      exportCsvBtn.addEventListener('click', function () {
+        __export_batch_video_csv__();
       });
     }
 
@@ -369,8 +650,330 @@ function __cancel_batch_download__() {
 }
 
 // ==================== 导出视频列表 ====================
+function __get_batch_export_videos__() {
+  var selectedVideos = __wx_batch_download_manager__.getSelectedVideos();
+  if (selectedVideos.length > 0) {
+    return selectedVideos;
+  }
+  return __wx_batch_download_manager__.videos.slice();
+}
+
+function __get_batch_export_scope_label__() {
+  return __wx_batch_download_manager__.getSelectedVideos().length > 0 ? '勾选' : '全部';
+}
+
+// 统一筛选并格式化可下载视频，确保 OSS 导出记录和实际批量任务使用完全相同的视频集合。
+function __prepare_batch_download_entries__(videos) {
+  var entries = [];
+  var sourceVideos = Array.isArray(videos) ? videos : [];
+
+  for (var i = 0; i < sourceVideos.length; i++) {
+    var video = sourceVideos[i];
+    if (!video || video.canDownload === false || video.type === 'live') {
+      continue;
+    }
+
+    var formatted = null;
+    var alreadyFormatted = false;
+    if (video.url && video.key !== undefined) {
+      formatted = video;
+      alreadyFormatted = true;
+    } else if (
+      video.objectDesc &&
+      typeof WXU !== 'undefined' &&
+      WXU &&
+      typeof WXU.format_feed === 'function'
+    ) {
+      formatted = WXU.format_feed(video);
+    }
+
+    if (formatted && formatted.canDownload !== false && (alreadyFormatted || formatted.type === 'media')) {
+      entries.push({ source: video, formatted: formatted });
+    }
+  }
+
+  return entries;
+}
+
+function __extract_batch_source_info__(spec) {
+  var info = { cgiId: '', sourceType: '' };
+
+  try {
+    if (spec && spec.length > 0 && spec[0].bypass) {
+      var bypassStr = spec[0].bypass;
+      var cgiMatch = bypassStr.match(/"cgi_id":(\d+)/) || bypassStr.match(/cgi_id:(\d+)/);
+
+      if (cgiMatch) {
+        info.cgiId = cgiMatch[1];
+        if (info.cgiId === '6638') {
+          info.sourceType = 'Home';
+        } else if (info.cgiId === '8060') {
+          info.sourceType = 'Other';
+        } else {
+          info.sourceType = 'Unknown_' + info.cgiId;
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[batch_download.js] 解析 bypass 失败', e);
+  }
+
+  return info;
+}
+
+function __batch_first_present__(values) {
+  for (var i = 0; i < values.length; i++) {
+    if (values[i] !== undefined && values[i] !== null && values[i] !== '') {
+      return values[i];
+    }
+  }
+  return '';
+}
+
+function __get_batch_interaction_count__(video, field) {
+  if (video && video[field] !== undefined && video[field] !== null) {
+    return video[field];
+  }
+
+  var countInfo = video && video.objectExtend && video.objectExtend.monotonicData &&
+    video.objectExtend.monotonicData.countInfo;
+  if (countInfo && countInfo[field] !== undefined && countInfo[field] !== null) {
+    return countInfo[field];
+  }
+
+  return '';
+}
+
+function __get_batch_csv_columns__(ossUploadEnabled) {
+  return [
+    { key: 'id', label: '视频ID' },
+    { key: 'title', label: '视频标题' },
+    { key: 'nickname', label: '作者昵称' },
+    { key: 'createTime', label: '发布时间' },
+    {
+      key: 'videoUrl',
+      label: ossUploadEnabled ? '视频链接（OSS地址）' : '视频链接（原始地址）'
+    },
+    { key: 'coverUrl', label: '视频封面链接' },
+    { key: 'duration', label: '视频时长' },
+    { key: 'sizeMB', label: '文件大小' },
+    { key: 'likeCount', label: '点赞数' },
+    { key: 'commentCount', label: '评论数' },
+    { key: 'favCount', label: '收藏数' },
+    { key: 'forwardCount', label: '转发数' },
+    { key: 'capturedAt', label: '数据采集时间' }
+  ];
+}
+
+// 默认保持 OSS 模式，供旧调用和调试脚本读取；实际导出时按勾选状态动态生成。
+var __wx_batch_csv_columns__ = __get_batch_csv_columns__(true);
+
+var __wx_batch_csv_keys__ = __wx_batch_csv_columns__.map(function (column) {
+  return column.key;
+});
+
+var __wx_batch_csv_headers__ = __wx_batch_csv_columns__.map(function (column) {
+  return column.label;
+});
+
+function __format_batch_csv_duration__(durationMs) {
+  if (durationMs === undefined || durationMs === null || durationMs === '') return '';
+  var text = String(durationMs).trim();
+  if (/^\d+:\d{1,2}(?::\d{1,2})?$/.test(text)) return text;
+
+  var milliseconds = Number(durationMs);
+  if (!isFinite(milliseconds) || milliseconds < 0) return '';
+  var totalSeconds = Math.floor(milliseconds / 1000);
+  var hours = Math.floor(totalSeconds / 3600);
+  var minutes = Math.floor((totalSeconds % 3600) / 60);
+  var seconds = totalSeconds % 60;
+  var pad = function (value) { return value < 10 ? '0' + value : String(value); };
+
+  if (hours > 0) return hours + ':' + pad(minutes) + ':' + pad(seconds);
+  return minutes + ':' + pad(seconds);
+}
+
+function __format_batch_csv_size__(sizeBytes, sizeMB) {
+  var bytes = Number(sizeBytes);
+  if (sizeBytes !== undefined && sizeBytes !== null && sizeBytes !== '' && isFinite(bytes) && bytes >= 0) {
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  if (sizeMB === undefined || sizeMB === null || sizeMB === '') return '';
+  var megabytes = parseFloat(String(sizeMB).replace(/\s*MB\s*$/i, ''));
+  if (!isFinite(megabytes) || megabytes < 0) return '';
+  return megabytes.toFixed(2) + ' MB';
+}
+
+function __format_batch_csv_captured_at__(value) {
+  var date = __parse_batch_date__(value);
+  if (!date) return '';
+  var pad = function (number) { return number < 10 ? '0' + number : String(number); };
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' +
+    pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+}
+
+function __get_batch_original_video_url__(video) {
+  var media = video && video.objectDesc && video.objectDesc.media && video.objectDesc.media[0];
+  var mediaURL = media && media.url ? media.url + (media.urlToken || '') : '';
+  return __batch_first_present__([
+    video && video.originalVideoUrl,
+    video && video.videoUrl,
+    video && video.url,
+    mediaURL
+  ]);
+}
+
+function __build_batch_csv_rows__(videos, fallbackCapturedAt, ossUploadEnabled) {
+  if (ossUploadEnabled === undefined) ossUploadEnabled = true;
+  return videos.map(function (v) {
+    var media = v.objectDesc && v.objectDesc.media && v.objectDesc.media[0];
+    var createtime = __batch_first_present__([v.createtime, v.createTime]);
+    var durationMs = __batch_first_present__([
+      v.duration,
+      media && media.durationMs,
+      media && media.spec && media.spec[0] && media.spec[0].durationMs,
+      media && media.videoPlayLen !== undefined && media.videoPlayLen !== null
+        ? media.videoPlayLen * 1000
+        : ''
+    ]);
+    var sizeBytes = __batch_first_present__([v.size, v.sizeBytes, media && media.fileSize]);
+
+    return [
+      __batch_first_present__([v.id]),
+      __batch_first_present__([v.title, v.objectDesc && v.objectDesc.description, '无标题']),
+      __batch_first_present__([v.nickname, v.contact && v.contact.nickname]),
+      __format_batch_create_time__(createtime),
+      ossUploadEnabled
+        ? __batch_first_present__([v.ossVideoUrl])
+        : __get_batch_original_video_url__(v),
+      __batch_first_present__([v.coverUrl, v.thumbUrl, v.fullThumbUrl, media && media.thumbUrl]),
+      __format_batch_csv_duration__(durationMs),
+      __format_batch_csv_size__(sizeBytes, v.sizeMB),
+      // 视频号主页数据中的 likeCount / favCount 与页面展示语义相反。
+      __get_batch_interaction_count__(v, 'favCount'),
+      __get_batch_interaction_count__(v, 'commentCount'),
+      __get_batch_interaction_count__(v, 'likeCount'),
+      __get_batch_interaction_count__(v, 'forwardCount'),
+      __format_batch_csv_captured_at__(__batch_first_present__([v.capturedAt, fallbackCapturedAt]))
+    ];
+  });
+}
+
+function __escape_batch_csv_cell__(value) {
+  var text = value === undefined || value === null ? '' : String(value);
+
+  // 防止标题、昵称等外部文本在 Excel 中被当作公式执行。
+  if (/^[\t\r\n ]*[=+\-@]/.test(text)) {
+    text = "'" + text;
+  }
+
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+
+function __build_batch_csv_content__(videos, fallbackCapturedAt, ossUploadEnabled) {
+  if (ossUploadEnabled === undefined) ossUploadEnabled = true;
+  var headers = __get_batch_csv_columns__(ossUploadEnabled).map(function (column) {
+    return column.label;
+  });
+  var rows = [headers].concat(__build_batch_csv_rows__(videos, fallbackCapturedAt, ossUploadEnabled));
+  return rows.map(function (row) {
+    return row.map(__escape_batch_csv_cell__).join(',');
+  }).join('\r\n');
+}
+
+function __batch_count_as_number__(value) {
+  var number = Number(value);
+  return isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+}
+
+function __build_batch_export_record_items__(videos, fallbackCapturedAt) {
+  return videos.map(function (video) {
+    var media = video.objectDesc && video.objectDesc.media && video.objectDesc.media[0];
+    var durationMs = __batch_first_present__([
+      video.duration,
+      media && media.durationMs,
+      media && media.spec && media.spec[0] && media.spec[0].durationMs,
+      media && media.videoPlayLen !== undefined && media.videoPlayLen !== null
+        ? media.videoPlayLen * 1000
+        : ''
+    ]);
+    var fileSize = __batch_first_present__([video.size, video.sizeBytes, media && media.fileSize]);
+    return {
+      videoId: String(__batch_first_present__([video.id])),
+      title: __batch_first_present__([video.title, video.objectDesc && video.objectDesc.description, '无标题']),
+      author: __batch_first_present__([video.nickname, video.contact && video.contact.nickname]),
+      publishTime: __format_batch_create_time__(__batch_first_present__([video.createtime, video.createTime])),
+      originalVideoUrl: __get_batch_original_video_url__(video),
+      coverUrl: __batch_first_present__([video.coverUrl, video.thumbUrl, video.fullThumbUrl, media && media.thumbUrl]),
+      durationMs: __batch_count_as_number__(durationMs),
+      fileSize: __batch_count_as_number__(fileSize),
+      likeCount: __batch_count_as_number__(__get_batch_interaction_count__(video, 'likeCount')),
+      commentCount: __batch_count_as_number__(__get_batch_interaction_count__(video, 'commentCount')),
+      favCount: __batch_count_as_number__(__get_batch_interaction_count__(video, 'favCount')),
+      forwardCount: __batch_count_as_number__(__get_batch_interaction_count__(video, 'forwardCount')),
+      capturedAt: __format_batch_csv_captured_at__(__batch_first_present__([video.capturedAt, fallbackCapturedAt]))
+    };
+  });
+}
+
+function __batch_export_filename__(date) {
+  var pad = function (value) { return value < 10 ? '0' + value : String(value); };
+  return 'batch_videos_' + date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
+    '_' + pad(date.getHours()) + '-' + pad(date.getMinutes()) + '-' + pad(date.getSeconds()) + '.csv';
+}
+
+async function __create_batch_export_record__(videos, ossUploadEnabled, exportedAt) {
+  var exportDate = __parse_batch_date__(exportedAt) || new Date();
+  var response = await fetch('/api/export-records', {
+    method: 'POST',
+    headers: __wx_channels_batch_api_headers__(),
+    body: JSON.stringify({
+      fileName: __batch_export_filename__(exportDate),
+      ossUploadEnabled: !!ossUploadEnabled,
+      videos: __build_batch_export_record_items__(videos, exportedAt)
+    })
+  });
+  var result = await response.json().catch(function () { return {}; });
+  if (!response.ok || (typeof result.code === 'number' && result.code !== 0)) {
+    throw new Error(result.message || result.error || '创建导出记录失败');
+  }
+  return result.data || result;
+}
+
+async function __mark_batch_export_failed__(exportRecordId, message) {
+  if (!exportRecordId) return;
+  try {
+    await fetch('/api/export-records/' + encodeURIComponent(exportRecordId) + '/fail', {
+      method: 'POST',
+      headers: __wx_channels_batch_api_headers__(),
+      body: JSON.stringify({ message: message || '启动批量下载失败' })
+    });
+  } catch (error) {
+    console.warn('[批量下载] 标记导出记录失败状态失败:', error);
+  }
+}
+
+async function __download_batch_export_record_csv__(record) {
+  var response = await fetch('/api/export-records/' + encodeURIComponent(record.id) + '/csv', {
+    method: 'GET',
+    headers: __wx_channels_batch_api_headers__()
+  });
+  if (!response.ok) {
+    var result = await response.json().catch(function () { return {}; });
+    throw new Error(result.message || result.error || '下载 CSV 失败');
+  }
+  var blob = await response.blob();
+  var url = URL.createObjectURL(blob);
+  var anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = record.fileName || 'batch_videos.csv';
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 function __export_batch_video_list__() {
-  var videos = __wx_batch_download_manager__.videos;
+  var videos = __get_batch_export_videos__();
 
   if (videos.length === 0) {
     __wx_log({ msg: '⚠️ 没有可导出的视频' });
@@ -382,40 +985,13 @@ function __export_batch_video_list__() {
     var media = v.objectDesc && v.objectDesc.media && v.objectDesc.media[0];
     var spec = v.spec || (media && media.spec) || [];
 
-    // 解析 bypass 获取更多信息 (如 cgi_id)
-    var cgiId = '';
-    var sourceType = '';
-
-    try {
-      if (spec && spec.length > 0 && spec[0].bypass) {
-        var bypassStr = spec[0].bypass;
-        // 简单提取 cgi_id (兼容 "key":val 和 key:val 格式)
-        var cgiMatch = bypassStr.match(/"cgi_id":(\d+)/) || bypassStr.match(/cgi_id:(\d+)/);
-
-        if (cgiMatch) {
-          cgiId = cgiMatch[1];
-          // 6638 = 首页 (FinderGetRecommend)
-          if (cgiId === '6638') {
-            sourceType = 'Home';
-          }
-          // 8060 = 其他 (未分类)
-          else if (cgiId === '8060') {
-            sourceType = 'Other';
-          }
-          else {
-            sourceType = 'Unknown_' + cgiId;
-          }
-        }
-      }
-    } catch (e) {
-      console.error('[batch_download.js] 解析 bypass 失败', e);
-    }
+    var sourceInfo = __extract_batch_source_info__(spec);
 
     return {
       id: v.id,
       title: v.title || (v.objectDesc && v.objectDesc.description) || '无标题',
-      sourceType: sourceType, // [新增] 数据来源类型
-      cgiId: cgiId,           // [新增] 接口ID
+      sourceType: sourceInfo.sourceType,
+      cgiId: sourceInfo.cgiId,
       url: v.url || (media && (media.url + (media.urlToken || ''))),
       key: v.key || (media && (media.decodeKey || media.decryptKey)) || '',
       coverUrl: v.coverUrl || v.thumbUrl || (media && media.thumbUrl),
@@ -438,7 +1014,79 @@ function __export_batch_video_list__() {
   a.click();
   URL.revokeObjectURL(url);
 
-  __wx_log({ msg: '📤 已导出 ' + exportData.length + ' 个视频（含来源标记）' });
+  __wx_log({ msg: '📤 已导出' + __get_batch_export_scope_label__() + ' ' + exportData.length + ' 个视频（JSON）' });
+}
+
+async function __export_batch_video_csv__() {
+  var videos = __get_batch_export_videos__();
+
+  if (videos.length === 0) {
+    __wx_log({ msg: '⚠️ 没有可导出的视频' });
+    return;
+  }
+
+  // 用户要求在导出 CSV 时缓存 OSS 配置。未勾选时不会读取或保存凭证。
+  var ossState = await __persist_batch_oss_config_if_needed__();
+  if (ossState === null) return;
+  if (ossState.enabled && __wx_batch_download_manager__.isDownloading) {
+    __wx_log({ msg: '⚠️ 当前已有批量任务，请等待完成后再创建 OSS 导出' });
+    return;
+  }
+
+  var preparedEntries = null;
+  var exportVideos = videos;
+  if (ossState.enabled) {
+    preparedEntries = __prepare_batch_download_entries__(videos);
+    exportVideos = preparedEntries.map(function (entry) { return entry.source; });
+    if (exportVideos.length === 0) {
+      __wx_log({ msg: '⚠️ 没有可下载并上传 OSS 的视频' });
+      return;
+    }
+  }
+
+  var exportButton = document.getElementById('batch-export-csv-btn');
+  if (exportButton) {
+    exportButton.disabled = true;
+    exportButton.textContent = ossState.enabled ? '正在创建任务...' : '正在导出...';
+  }
+
+  var exportedAt = new Date().toISOString();
+  var exportRecord;
+  try {
+    exportRecord = await __create_batch_export_record__(exportVideos, ossState.enabled, exportedAt);
+    if (!ossState.enabled) {
+      await __download_batch_export_record_csv__(exportRecord);
+      __wx_log({
+        msg: '📊 已导出' + __get_batch_export_scope_label__() + ' ' + exportVideos.length +
+          ' 个视频（CSV，使用原始视频链接），并写入控制台“导出记录”'
+      });
+      return;
+    }
+
+    var started = await __batch_download_selected__({
+      videos: exportVideos,
+      preparedEntries: preparedEntries,
+      ossState: ossState,
+      exportRecordId: exportRecord.id
+    });
+    if (!started) {
+      await __mark_batch_export_failed__(exportRecord.id, '未能启动关联的下载及 OSS 上传任务');
+      return;
+    }
+    __wx_log({
+      msg: '☁️ OSS 导出任务已创建，不会立即下载 CSV。请到控制台“导出记录”等待全部视频上传完成后下载；上传进度可在“OSS上传队列”查看。'
+    });
+  } catch (error) {
+    if (exportRecord && exportRecord.id) {
+      await __mark_batch_export_failed__(exportRecord.id, error.message || String(error));
+    }
+    __wx_log({ msg: '❌ 创建 CSV 导出任务失败：' + (error.message || error) });
+  } finally {
+    if (exportButton) {
+      exportButton.disabled = false;
+      exportButton.textContent = '导出 CSV';
+    }
+  }
 }
 
 // ==================== 清空视频列表 ====================
@@ -754,11 +1402,35 @@ function __update_batch_ui__() {
   }
 }
 
-function __format_batch_create_time__(unixSeconds) {
-  if (!unixSeconds) {
-    return '';
+function __parse_batch_date__(value) {
+  if (value === undefined || value === null || value === '') return null;
+  var date;
+  var text = String(value).trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) {
+    var timestamp = Number(text);
+    if (!isFinite(timestamp)) return null;
+    date = new Date(Math.abs(timestamp) < 1000000000000 ? timestamp * 1000 : timestamp);
+  } else {
+    var localMatch = text.match(/^(\d{4})[-\/]([01]?\d)[-\/]([0-3]?\d)(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/);
+    if (localMatch) {
+      date = new Date(
+        Number(localMatch[1]),
+        Number(localMatch[2]) - 1,
+        Number(localMatch[3]),
+        Number(localMatch[4] || 0),
+        Number(localMatch[5] || 0),
+        Number(localMatch[6] || 0)
+      );
+    } else {
+      date = new Date(text);
+    }
   }
-  var date = new Date(unixSeconds * 1000);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function __format_batch_create_time__(value) {
+  var date = __parse_batch_date__(value);
+  if (!date) return '';
   var pad = function(value) {
     return value < 10 ? '0' + value : String(value);
   };
@@ -774,45 +1446,38 @@ function __format_batch_size_mb__(bytes) {
 }
 
 // ==================== 批量下载 ====================
-async function __batch_download_selected__() {
-  var selectedVideos = __wx_batch_download_manager__.getSelectedVideos();
+async function __batch_download_selected__(options) {
+  options = options || {};
+  var selectedVideos = Array.isArray(options.videos)
+    ? options.videos
+    : __wx_batch_download_manager__.getSelectedVideos();
 
   if (selectedVideos.length === 0) {
     __wx_log({ msg: '❌ 请先选择要下载的视频' });
-    return;
+    return false;
   }
 
   if (__wx_batch_download_manager__.isDownloading) {
     __wx_log({ msg: '⚠️ 正在下载中，请等待...' });
-    return;
+    return false;
   }
 
-  // 格式化视频数据（使用 WXU.format_feed 统一格式）
-  var formattedVideos = [];
-  for (var i = 0; i < selectedVideos.length; i++) {
-    var video = selectedVideos[i];
-
-    // 跳过不能下载的项目（直播等）
-    if (video.canDownload === false || video.type === 'live') {
-      continue;
-    }
-
-    // 如果已经格式化过（有 url 和 key 字段），直接使用
-    if (video.url && video.key !== undefined) {
-      formattedVideos.push(video);
-    } else if (video.objectDesc) {
-      // 否则使用 format_feed 格式化
-      var formatted = WXU.format_feed(video);
-      if (formatted && formatted.type === 'media' && formatted.canDownload !== false) {
-        formattedVideos.push(formatted);
-      }
-    }
-  }
+  // OSS 导出会预先传入同一份筛选结果，避免导出记录与下载任务数量不一致。
+  var preparedEntries = Array.isArray(options.preparedEntries)
+    ? options.preparedEntries
+    : __prepare_batch_download_entries__(selectedVideos);
+  var formattedVideos = preparedEntries.map(function (entry) { return entry.formatted; });
 
   if (formattedVideos.length === 0) {
     __wx_log({ msg: '❌ 没有可下载的视频' });
-    return;
+    return false;
   }
+
+  // 首次使用时也在开始下载前保存配置，确保本批次可立即同步上传。
+  var ossState = options.ossState !== undefined
+    ? options.ossState
+    : await __persist_batch_oss_config_if_needed__();
+  if (ossState === null) return false;
 
   // 设置下载状态
   __wx_batch_download_manager__.isDownloading = true;
@@ -841,7 +1506,9 @@ async function __batch_download_selected__() {
 
   try {
     // 构建批量下载请求数据
-    var batchVideos = formattedVideos.map(function(video) {
+    var batchVideos = preparedEntries.map(function(entry) {
+      var video = entry.formatted;
+      var sourceVideo = entry.source || video;
       var authorName = video.nickname || (video.contact && video.contact.nickname) || '未知作者';
       var normalizedDownload = typeof __wx_channels_normalize_video_download__ === 'function'
         ? __wx_channels_normalize_video_download__(video, null)
@@ -873,7 +1540,10 @@ async function __batch_download_selected__() {
         durationMs: video.duration || 0,
         size: video.size || 0,
         sizeMB: __format_batch_size_mb__(video.size || 0),
-        createTime: __format_batch_create_time__(video.createtime || 0)
+        createTime: __format_batch_create_time__(video.createtime || 0),
+        // WXU.format_feed may return a new object. Keep the collection snapshot
+        // from the source item so the export row and OSS object date stay aligned.
+        capturedAt: __format_batch_csv_captured_at__(sourceVideo.capturedAt || video.capturedAt || new Date().toISOString())
       };
     });
 
@@ -883,7 +1553,9 @@ async function __batch_download_selected__() {
       headers: __wx_channels_batch_api_headers__(),
       body: JSON.stringify({
         videos: batchVideos,
-        forceRedownload: __wx_batch_download_manager__.forceRedownload
+        forceRedownload: __wx_batch_download_manager__.forceRedownload,
+        ossUploadEnabled: ossState.enabled,
+        exportRecordId: options.exportRecordId || ''
       })
     });
 
@@ -899,7 +1571,10 @@ async function __batch_download_selected__() {
       throw new Error(result.error || result.message || '启动批量下载失败');
     }
 
-    __wx_log({ msg: '✅ 批量下载已启动，并发数: ' + (data.concurrency || 5) });
+    __wx_log({
+      msg: '✅ 批量下载已启动，并发数: ' + (data.concurrency || 5) +
+        (ossState.enabled ? '，完成后将同步上传 OSS' : '')
+    });
 
     // 等待100ms后立即查询一次进度（避免错过快速完成的下载）
     await new Promise(function(resolve) { setTimeout(resolve, 100); });
@@ -914,6 +1589,7 @@ async function __batch_download_selected__() {
         var progressData = await progressRes.json();
         var data = progressData.data || progressData;
         if (progressData.success || progressData.code === 0 || data.total !== undefined) {
+          __merge_batch_oss_task_results__(data.tasks || []);
           var total = data.total || 0;
           var done = data.done || 0;
           var failed = data.failed || 0;
@@ -922,7 +1598,7 @@ async function __batch_download_selected__() {
           if (total > 0 && done + failed >= total) {
             __wx_log({ msg: '✅ 批量下载完成: 成功 ' + done + ' 个, 失败 ' + failed + ' 个' });
             __reset_batch_download_ui__();
-            return;
+            return true;
           }
         }
       }
@@ -962,6 +1638,7 @@ async function __batch_download_selected__() {
           // 兼容两种响应格式
           var data = progressData.data || progressData;
           if (progressData.success || progressData.code === 0 || data.total !== undefined) {
+            __merge_batch_oss_task_results__(data.tasks || []);
             var total = data.total || 0;
             var done = data.done || 0;
             var failed = data.failed || 0;
@@ -981,6 +1658,11 @@ async function __batch_download_selected__() {
                 var currentTask = data.currentTasks[0];
                 if (currentTask.progress > 0) {
                   progressText.textContent += ' - ' + currentTask.progress.toFixed(1) + '%';
+                }
+                if (currentTask.ossStatus === 'uploading') {
+                  progressText.textContent += ' - 正在上传OSS';
+                } else if (currentTask.ossStatus === 'retrying') {
+                  progressText.textContent += ' - OSS上传重试中';
                 }
               }
             }
@@ -1026,11 +1708,13 @@ async function __batch_download_selected__() {
         console.error('[批量下载] 轮询进度失败:', e);
       }
     }, 2000); // 每2秒轮询一次
+    return true;
 
   } catch (err) {
     __wx_log({ msg: '❌ 批量下载失败: ' + (err.message || err) });
     console.error('[批量下载] 错误:', err);
     __reset_batch_download_ui__();
+    return false;
   }
 }
 

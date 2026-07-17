@@ -82,11 +82,16 @@ function Invoke-GoBuild {
         $env:GOOS = ''
         $env:GOARCH = ''
         $env:CGO_ENABLED = '1'
+        # Current MinGW releases default to C23 and expose newer IP Helper types.
+        # These flags preserve compatibility with go-libutp and bundled SunnyNet.
+        $env:CGO_CFLAGS = '-std=gnu17 -D_WIN32_WINNT=0x0501'
+        $env:CGO_CXXFLAGS = '-std=gnu++17 -D_WIN32_WINNT=0x0501'
+        $env:CGO_LDFLAGS = '-Wl,--allow-multiple-definition -lwinpthread'
         $ldflags = "-w -s -extldflags '-static'"
         if (Test-Path $OutputName) {
             Remove-Item $OutputName -Force
         }
-        go build -mod=vendor "-ldflags=$ldflags" -o $OutputName
+        go build -mod=mod "-ldflags=$ldflags" -o $OutputName
         Assert-LastExitCode -CommandName ("go build -o " + $OutputName)
     }
     finally {

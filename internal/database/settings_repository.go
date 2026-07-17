@@ -36,6 +36,8 @@ const (
 	SettingKeyMaxRetries                  = "max_retries"
 	SettingKeyRadarEnabled                = "radar_enabled"
 	SettingKeyTheme                       = "theme"
+	SettingKeyOSSAccessKeyID              = "oss_access_key_id"
+	SettingKeyOSSAccessKeySecret          = "oss_access_key_secret"
 )
 
 // Get 根据键获取设置值
@@ -71,6 +73,59 @@ func (r *SettingsRepository) Delete(key string) error {
 	_, err := r.db.Exec("DELETE FROM settings WHERE key = ?", key)
 	if err != nil {
 		return fmt.Errorf("failed to delete setting: %w", err)
+	}
+	return nil
+}
+
+// SetOSSConfig 原子保存一组 OSS 凭证，避免只更新其中一个字段。
+func (r *SettingsRepository) SetOSSConfig(accessKeyID, accessKeySecret string) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin OSS settings transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	query := `
+		INSERT INTO settings (key, value, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?
+	`
+	now := time.Now()
+	settings := []struct {
+		key   string
+		value string
+	}{
+		{key: SettingKeyOSSAccessKeyID, value: accessKeyID},
+		{key: SettingKeyOSSAccessKeySecret, value: accessKeySecret},
+	}
+	for _, setting := range settings {
+		if _, err := tx.Exec(query, setting.key, setting.value, now, setting.value, now); err != nil {
+			return fmt.Errorf("failed to set OSS setting: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit OSS settings: %w", err)
+	}
+	return nil
+}
+
+// DeleteOSSConfig 原子清除 OSS_ACCESS_KEY_ID 与 OSS_ACCESS_KEY_SECRET。
+func (r *SettingsRepository) DeleteOSSConfig() error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin OSS settings transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		"DELETE FROM settings WHERE key IN (?, ?)",
+		SettingKeyOSSAccessKeyID,
+		SettingKeyOSSAccessKeySecret,
+	); err != nil {
+		return fmt.Errorf("failed to delete OSS settings: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit OSS settings deletion: %w", err)
 	}
 	return nil
 }

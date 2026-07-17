@@ -1,7 +1,7 @@
 # AI Coding Agent Instructions for wx_channel
 
 ## Project Overview
-**微信视频号下载助手** (WeChat Channel Video Downloader) is a Windows desktop application written in Go 1.23+ that:
+**微信视频号下载助手** (WeChat Channel Video Downloader) is a Windows desktop application written in Go 1.24.3+ that:
 - Intercepts and downloads videos from WeChat Channels
 - Automatically decrypts encrypted videos
 - Provides batch download capabilities and a web console for management
@@ -29,7 +29,7 @@ Service Layer (internal/services/):
   - StatisticsService
   - QueueService, etc.
   ↓
-Data Layer (SQLite via GORM in internal/database/)
+Data Layer (SQLite via database/sql repositories in internal/database/)
 ```
 
 ### Critical Components
@@ -70,10 +70,11 @@ WeChat JS fires custom events via eventbus (defined in `internal/assets/inject/e
 
 New handlers intercept these via regex replacements in JavaScript strings. See `script.go` for patterns.
 
-### 4. Configuration Priority (Dynamic Reloading)
-1. YAML config file (`config.yaml`)
-2. Environment variables
-3. Database settings table (allows runtime updates without restart)
+### 4. Configuration Priority
+1. Command-line flags (currently the proxy port)
+2. Environment variables (`WX_CHANNEL_*`)
+3. YAML config file (`config.yaml`)
+4. Defaults
 
 When modifying config, use `config.Get()` to get current instance, not `Config` passed at startup.
 
@@ -99,22 +100,23 @@ Clients receive real-time updates without polling.
 
 ### Building
 ```powershell
-# Standard build (Windows amd64)
-go build -o wx_channel.exe
+# The script restores pinned SunnyNet runtime files and sets required CGO flags.
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action test
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action build
 
-# With version info
-go build -ldflags "-X wx_channel/internal/version.Version=v1.0.0" -o wx_channel.exe
+# Run from source
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action run
 ```
 
 ### Key Dependencies
 - `github.com/qtgolang/SunnyNet`: HTTP proxy interception (Windows only)
 - `github.com/GopeedLab/gopeed`: Download engine integration
-- `gorm.io/gorm`: ORM for SQLite database
+- `github.com/mattn/go-sqlite3`: Local records database
 - `github.com/spf13/cobra`: CLI framework
-- `github.com/gorilla/websocket`: WebSocket support
+- `github.com/coder/websocket`: WebSocket support
 
 ### Testing
-**No test files found.** When adding tests:
+The repository has unit and integration-style package tests. Run all of them through `scripts/dev.ps1 -Action test` so the required CGO flags are present. When adding tests:
 - Use Go's testing package in `*_test.go` files
 - Mock SunnyNet/Gopeed dependencies
 - Test service logic independently from HTTP handlers
@@ -150,20 +152,19 @@ go build -ldflags "-X wx_channel/internal/version.Version=v1.0.0" -o wx_channel.
 - **Error Handling**: Always log errors with context. No silent failures.
 - **Goroutines**: Use goroutine-safe patterns (sync.Mutex, channels). See `handlers/websocket.go` for Hub pattern.
 - **JSON Responses**: Use `response.APIResponse` struct for consistency
-- **Database**: Use repository pattern (e.g., `SettingsRepository`). Queries in `pkg/database/`.
+- **Database**: Use repository pattern (e.g., `SettingsRepository`). Queries live in `internal/database/`.
 - **Path Handling**: Use `filepath` package for Windows compatibility (not string concatenation)
 - **File Operations**: Handle cleanup in defer blocks; watch for lock contention in concurrent downloads
 
 ## Known Limitations & Workarounds
 
 1. **Windows-Only**: SunnyNet proxy library is Windows-specific. No Linux/macOS support.
-2. **WeChat JS Changes**: Regex patterns for JS interception break when WeChat updates their bundled code. Monitor `dev-docs/FIX_HISTORY.md` for patches.
+2. **WeChat JS Changes**: Regex patterns for JS interception can break when WeChat updates bundled code. Keep implementation notes and public docs aligned with the current handlers.
 3. **Concurrent Download Issues**: Multiple handlers accessing same file can cause corruption. Semaphores used to limit concurrency (see `UploadHandler.chunkSem`).
 4. **Config Reloading**: Not all config changes take effect immediately. Some require restart or manual handler reload.
 
 ## Documentation Resources
-- **Architecture**: `dev-docs/DOCUMENTATION.md`
-- **API Endpoints**: `dev-docs/api_documentation.md`
-- **Fix History**: `dev-docs/FIX_HISTORY.md` (reference for past bugs)
-- **Changelog**: `dev-docs/CHANGELOG.md`
-- **Web Console**: `docs/WEB_CONSOLE.md`
+- **Build and local run**: `docs/BUILD.md`
+- **API endpoints**: `web/docs/API.md`
+- **Changelog**: `CHANGELOG.md`
+- **Web console**: `docs/WEB_CONSOLE.md`

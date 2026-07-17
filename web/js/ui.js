@@ -114,13 +114,15 @@ function getStatusText(status) {
 // UI Navigation
 // ============================================
 let currentPage = 'dashboard';
-const validPages = ['dashboard', 'browse', 'downloads', 'batch', 'queue', 'settings', 'help', 'radar'];
+const validPages = ['dashboard', 'browse', 'downloads', 'batch', 'queue', 'exports', 'oss-queue', 'settings', 'help', 'radar'];
 const pageTitles = {
     dashboard: '仪表盘',
     browse: '浏览记录',
     downloads: '下载记录',
     batch: '批量下载',
     queue: '下载队列',
+    exports: '导出记录',
+    'oss-queue': 'OSS上传队列',
     settings: '设置',
     help: '帮助',
     radar: '对标雷达'
@@ -139,6 +141,11 @@ function navigateTo(page, updateHistory = true) {
             clearInterval(window.queueBatchProgressInterval);
             window.queueBatchProgressInterval = null;
         }
+    }
+
+    if ((currentPage === 'exports' || currentPage === 'oss-queue') && page !== currentPage &&
+        typeof stopExportPagePolling === 'function') {
+        stopExportPagePolling();
     }
 
     document.querySelectorAll('.nav-item').forEach(item => {
@@ -230,6 +237,12 @@ async function loadPageData(page) {
                 }
                 break;
             case 'queue': await loadDownloadQueue(); break;
+            case 'exports':
+                if (typeof loadExportRecords === 'function') await loadExportRecords();
+                break;
+            case 'oss-queue':
+                if (typeof loadOSSUploadQueue === 'function') await loadOSSUploadQueue();
+                break;
             case 'settings': await loadSettings(); break;
         }
     } catch (e) {

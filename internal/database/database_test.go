@@ -302,6 +302,27 @@ func TestSettingsRepository(t *testing.T) {
 		t.Errorf("Expected concurrent limit 5, got %d", loaded.ConcurrentLimit)
 	}
 
+	// OSS 凭证必须成对保存和清除。
+	if err := repo.SetOSSConfig("test-access-id", "test-access-secret"); err != nil {
+		t.Fatalf("Failed to save OSS config: %v", err)
+	}
+	accessKeyID, err := repo.Get(SettingKeyOSSAccessKeyID)
+	if err != nil || accessKeyID != "test-access-id" {
+		t.Fatalf("Unexpected OSS access key ID: %q, error: %v", accessKeyID, err)
+	}
+	accessKeySecret, err := repo.Get(SettingKeyOSSAccessKeySecret)
+	if err != nil || accessKeySecret != "test-access-secret" {
+		t.Fatalf("Unexpected OSS access key secret: %q, error: %v", accessKeySecret, err)
+	}
+	if err := repo.DeleteOSSConfig(); err != nil {
+		t.Fatalf("Failed to clear OSS config: %v", err)
+	}
+	accessKeyID, _ = repo.Get(SettingKeyOSSAccessKeyID)
+	accessKeySecret, _ = repo.Get(SettingKeyOSSAccessKeySecret)
+	if accessKeyID != "" || accessKeySecret != "" {
+		t.Fatalf("OSS config was not cleared: id=%q secret=%q", accessKeyID, accessKeySecret)
+	}
+
 	// 测试验证
 	invalidSettings := &Settings{
 		ChunkSize:       500000, // Too small (< 1MB)

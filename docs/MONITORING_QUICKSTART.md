@@ -1,50 +1,53 @@
-# 🚀 监控功能快速启动指南
+# Prometheus 监控快速开始
 
-## 1️⃣ 启动客户端（启用监控）
+## 启用监控
 
-```bash
-wx_channel_metrics.exe
-```
+普通版 `wx_channel.exe` 已内置 Prometheus 端点，不需要单独的 metrics 可执行文件。
 
-看到这条消息表示监控已启动：
-```
-✓ Prometheus 监控已启动: http://localhost:9090/metrics
-```
+在 `config.yaml` 中确认：
 
-## 2️⃣ 查看监控数据
-
-### 方式 1: 直接访问 Prometheus 端点
-浏览器打开: http://localhost:9090/metrics
-
-### 方式 2: Hub Server 监控面板
-浏览器打开: https://wx.dongzuren.com/monitoring
-
-## 3️⃣ 监控指标说明
-
-| 指标 | 说明 |
-|------|------|
-| 连接数 | 当前 WebSocket 连接数 |
-| API 调用 | API 调用总次数和成功率 |
-| 心跳 | 心跳发送和失败次数 |
-| 重连 | 重连尝试和成功次数 |
-| 压缩 | 数据压缩前后的大小 |
-
-## 4️⃣ 配置文件
-
-`config.yaml---`:
 ```yaml
-# Prometheus 监控配置
-metrics_enabled: true    # 启用监控
-metrics_port: 9090       # 监控端口
+metrics_enabled: true
+metrics_port: 9090
 ```
 
-## 5️⃣ 禁用监控
+然后启动：
 
-如需禁用，修改配置：
+```powershell
+.\wx_channel.exe
+```
+
+日志出现以下内容即表示成功：
+
+```text
+Prometheus 监控已启动: http://localhost:9090/metrics
+```
+
+## 验证
+
+浏览器打开：
+
+```text
+http://127.0.0.1:9090/metrics
+```
+
+或在 PowerShell 中执行：
+
+```powershell
+(Invoke-WebRequest http://127.0.0.1:9090/metrics -UseBasicParsing).StatusCode
+```
+
+预期返回 `200`。
+
+## 修改端口或禁用
+
 ```yaml
 metrics_enabled: false
+metrics_port: 9191
 ```
 
----
+修改后需要重启程序。端口冲突可用以下命令检查：
 
-**详细文档**: `dev-docs/PROMETHEUS_MONITORING_ENABLED.md`
+```powershell
+Get-NetTCPConnection -LocalPort 9090 -ErrorAction SilentlyContinue
+```

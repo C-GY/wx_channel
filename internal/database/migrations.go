@@ -283,6 +283,64 @@ CREATE INDEX IF NOT EXISTS idx_radar_logs_check_time ON radar_logs(check_time);
 		Description: "Add video_list column to radar_logs for per-video details",
 		Up:          `ALTER TABLE radar_logs ADD COLUMN video_list TEXT DEFAULT '';`,
 	},
+	{
+		Version:     15,
+		Description: "Create CSV export records and OSS upload queue tables",
+		Up: `
+CREATE TABLE IF NOT EXISTS export_records (
+    id TEXT PRIMARY KEY,
+    file_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'processing',
+    oss_upload_enabled INTEGER NOT NULL DEFAULT 0,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    completed_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT DEFAULT '',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    ready_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_records_created_at ON export_records(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_export_records_status ON export_records(status);
+
+CREATE TABLE IF NOT EXISTS export_record_items (
+    export_record_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    video_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL DEFAULT '',
+    publish_time TEXT NOT NULL DEFAULT '',
+    original_video_url TEXT NOT NULL DEFAULT '',
+    oss_video_url TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    like_count INTEGER NOT NULL DEFAULT 0,
+    comment_count INTEGER NOT NULL DEFAULT 0,
+    fav_count INTEGER NOT NULL DEFAULT 0,
+    forward_count INTEGER NOT NULL DEFAULT 0,
+    captured_at TEXT NOT NULL DEFAULT '',
+    download_status TEXT NOT NULL DEFAULT 'pending',
+    download_progress REAL NOT NULL DEFAULT 0,
+    downloaded_mb REAL NOT NULL DEFAULT 0,
+    total_mb REAL NOT NULL DEFAULT 0,
+    oss_status TEXT NOT NULL DEFAULT 'pending',
+    oss_progress REAL NOT NULL DEFAULT 0,
+    oss_uploaded_bytes INTEGER NOT NULL DEFAULT 0,
+    oss_total_bytes INTEGER NOT NULL DEFAULT 0,
+    oss_object_key TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (export_record_id, video_id),
+    FOREIGN KEY(export_record_id) REFERENCES export_records(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_record_items_position ON export_record_items(export_record_id, position);
+CREATE INDEX IF NOT EXISTS idx_export_record_items_oss_status ON export_record_items(oss_status, updated_at DESC);
+`,
+	},
 }
 
 // runMigrations 执行所有待处理的迁移

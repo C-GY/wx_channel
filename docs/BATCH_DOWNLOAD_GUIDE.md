@@ -410,16 +410,9 @@ X-Local-Auth: your-token
 ## 相关文档
 
 - [Web 控制台使用指南](WEB_CONSOLE.md) - Web 控制台完整指南
-- [API 文档](API.md) - HTTP API 接口说明
+- [API 文档](../web/docs/API.md) - HTTP API 接口说明
 - [配置概览](CONFIGURATION.md) - 配置选项说明
 - [故障排除](TROUBLESHOOTING.md) - 常见问题解决方案
-
-### 详细文档（开发者参考）
-
-- [批量下载索引](fix/BATCH_DOWNLOAD_INDEX.md) - 完整文档导航
-- [批量下载快速开始](fix/BATCH_DOWNLOAD_QUICK_START.md) - 5分钟上手
-- [批量下载 API](fix/BATCH_DOWNLOAD_API.md) - API 详细文档
-- [批量下载加密说明](fix/BATCH_DOWNLOAD_ENCRYPTION.md) - 加密详解
 
 ---
 

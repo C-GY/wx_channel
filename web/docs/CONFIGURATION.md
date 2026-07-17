@@ -19,7 +19,7 @@
 WX_CHANNEL_PORT=2025
 
 # 下载目录（默认：downloads）
-WX_CHANNEL_DOWNLOADS_DIR=downloads
+WX_CHANNEL_DOWNLOAD_DIR=downloads
 
 # 记录文件名（默认：download_records.csv）
 WX_CHANNEL_RECORDS_FILE=download_records.csv
@@ -67,12 +67,33 @@ WX_CHANNEL_UPLOAD_MERGE_CONCURRENCY=1
 #### 下载配置
 
 ```bash
-# 批量下载并发上限（默认：2）
-WX_CHANNEL_DOWNLOAD_CONCURRENCY=2
+# 批量下载并发上限（默认：5）
+WX_CHANNEL_DOWNLOAD_CONCURRENCY=5
 
 # 批量下载重试次数（默认：3）
 WX_CHANNEL_DOWNLOAD_RETRY_COUNT=3
+
+# 单文件下载超时（默认：30m）
+WX_CHANNEL_DOWNLOAD_TIMEOUT=30m
 ```
+
+### config.yaml 关键项
+
+以下配置项当前更适合通过 `config.yaml` 维护：
+
+```yaml
+# 下载文件名模板，留空则使用默认标题命名
+# 支持占位符: {date} {datetime} {author} {title} {duration} {video_id} {size}
+download_filename_template: ""
+
+# 对标雷达默认关闭；修改后需重启程序
+radar_enabled: false
+```
+
+**说明**：
+* `download_filename_template` 主要影响批量下载、下载队列和队列转批量下载的最终文件名。
+* 模板字段缺失时会自动跳过，回退到默认命名策略。
+* `radar_enabled` 属于配置持有项，本地控制台只展示状态，不负责持久化该值。
 
 #### UI 功能开关
 
@@ -95,23 +116,22 @@ WX_CHANNEL_SHOW_LOG_BUTTON=false
 wx_channel.exe --help
 
 # 显示版本信息
-wx_channel.exe -v
-wx_channel.exe --version
+wx_channel.exe version
 
 # 指定代理端口
 wx_channel.exe -p 8080
 wx_channel.exe --port 8080
 
 # 卸载根证书
-wx_channel.exe --uninstall
+wx_channel.exe uninstall
 ```
 
 #### 参数说明
 
 * `--help`: 显示帮助信息并退出
-* `-v, --version`: 显示版本信息并退出
+* `version`: 显示版本信息并退出
 * `-p, --port`: 设置代理服务器端口（默认：2025）
-* `--uninstall`: 卸载根证书并退出
+* `uninstall`: 卸载根证书并退出
 
 ### 证书配置
 
@@ -130,10 +150,10 @@ wx_channel.exe --uninstall
 
 #### 卸载证书
 
-使用 `--uninstall` 参数可以卸载已安装的根证书：
+使用 `uninstall` 子命令可以卸载已安装的根证书：
 
 ```bash
-wx_channel.exe --uninstall
+wx_channel.exe uninstall
 ```
 
 **注意**：卸载证书可能需要管理员权限。如果程序仍在运行，请重新进入视频号以确保更改生效。
@@ -231,6 +251,19 @@ downloads/
 * 文件名和目录名会自动清理非法字符
 * 如果文件名缺少扩展名，会自动补充 `.mp4`
 * 重名文件会自动添加编号，如 `(1)`, `(2)` 等
+* 若配置 `download_filename_template`，则优先使用模板渲染文件名
+
+#### 文件名模板占位符
+
+| 占位符 | 含义 | 示例 |
+|------|------|------|
+| `{date}` | 视频日期 | `2026-05-20` |
+| `{datetime}` | 视频日期时间 | `2026-05-20_12-30-45` |
+| `{author}` | 作者昵称 | `ExampleCreator` |
+| `{title}` | 视频标题 | `Welcome to my livestream` |
+| `{duration}` | 视频时长 | `1h54m28s` |
+| `{video_id}` | 视频 ID | `vid_123` |
+| `{size}` | 视频大小 | `28.77MB` / `3.00 MB` |
 
 ### 高级配置
 
@@ -245,8 +278,8 @@ WX_CHANNEL_UPLOAD_CHUNK_CONCURRENCY=4
 # 分片合并并发上限（默认：1）
 WX_CHANNEL_UPLOAD_MERGE_CONCURRENCY=1
 
-# 批量下载并发上限（默认：2）
-WX_CHANNEL_DOWNLOAD_CONCURRENCY=2
+# 批量下载并发上限（默认：5）
+WX_CHANNEL_DOWNLOAD_CONCURRENCY=5
 ```
 
 #### 重试配置
@@ -272,7 +305,8 @@ WX_CHANNEL_MAX_UPLOAD_SIZE=67108864
 
 1. **命令行参数**（最高优先级）
 2. **环境变量**
-3. **默认值**（最低优先级）
+3. **`config.yaml`**
+4. **默认值**（最低优先级）
 
 例如，如果同时设置了环境变量和命令行参数，命令行参数会覆盖环境变量。
 

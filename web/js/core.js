@@ -265,7 +265,7 @@ const ApiClient = {
 
         if (!response.ok) {
             const error = await response.json().catch(() => ({ error: 'Unknown error' }));
-            throw new Error(error.error || `HTTP ${response.status}`);
+            throw new Error(error.message || error.error || `HTTP ${response.status}`);
         }
 
         return await response.json();
@@ -302,6 +302,17 @@ const ApiClient = {
     async reorderQueue(ids) { return await this.request('PUT', '/queue/reorder', { ids }); },
     async completeDownload(id) { return await this.request('PUT', `/queue/${id}/complete`); },
     async failDownload(id, error) { return await this.request('PUT', `/queue/${id}/fail`, { error }); },
+
+    // CSV Export Records / OSS Upload Queue
+    async getExportRecords(params = {}) {
+        const query = new URLSearchParams(params).toString();
+        return await this.request('GET', `/export-records${query ? '?' + query : ''}`);
+    },
+    async getExportRecord(id) { return await this.request('GET', `/export-records/${encodeURIComponent(id)}`); },
+    async getOSSUploadQueue(limit = 100000) { return await this.request('GET', `/oss-upload-queue?limit=${encodeURIComponent(limit)}`); },
+    async downloadExportRecordCSV(id) {
+        return await this.downloadFile(`/export-records/${encodeURIComponent(id)}/csv`);
+    },
 
     // Settings
     async getSettings() { return await this.request('GET', '/settings'); },

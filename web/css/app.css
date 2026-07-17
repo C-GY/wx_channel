@@ -2382,6 +2382,34 @@ select.filter-btn:focus {
     margin: 0 12px;
 }
 
+/* CSV 导出记录与 OSS 上传队列 */
+.csv-export-progress-track {
+    width: 100%;
+    min-width: 120px;
+    height: 7px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--bg-hover);
+}
+
+.csv-export-progress-fill {
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--primary-color), var(--success-color));
+    transition: width 0.25s ease;
+}
+
+.csv-export-progress-fill.failed {
+    background: var(--danger-color);
+}
+
+.csv-export-progress-label {
+    margin-top: 6px;
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
 /* ============================================
    Form Elements - 表单元素
    ============================================ */

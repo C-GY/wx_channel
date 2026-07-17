@@ -154,29 +154,6 @@ func (app *App) Run() {
 		close(done)
 	}()
 
-	// 启动时检查更新 (移到这里以确保尽早执行)
-	go func() {
-		time.Sleep(2 * time.Second) // 缩短等待时间
-		utils.Info("正在检查更新...")
-		vService := services.NewVersionService()
-		result, err := vService.CheckUpdate()
-		if err != nil {
-			utils.Warn("检查更新失败: %v", err)
-			return
-		}
-
-		if result.HasUpdate {
-			utils.PrintSeparator()
-			color.Green("🚀 发现新版本 available: v%s", result.LatestVersion)
-			color.Green("⬇️ 下载地址: %s", result.DownloadURL)
-			utils.PrintSeparator()
-		} else {
-			utils.PrintSeparator()
-			color.Green("✅ 当前已是最新版本: v%s", result.CurrentVersion)
-			utils.PrintSeparator()
-		}
-	}()
-
 	if err := app.initDownloadRecords(); err != nil {
 		utils.HandleError(err, "初始化下载记录系统")
 	} else {
@@ -362,8 +339,6 @@ func (app *App) Run() {
 
 	utils.Info("💡 服务正在运行，按 Ctrl+C 退出...")
 
-	// 启动时检查更新 - 已移动到 Run 函数开头
-
 	<-done
 
 	// 清理服务
@@ -457,12 +432,6 @@ func (app *App) printTitle() {
 	color.Unset()
 
 	color.Yellow("    微信视频号下载助手 v%s", app.Cfg.Version)
-	color.Yellow("    项目地址：https://github.com/nobiyou/wx_channel")
-	color.Green("    v%s 更新要点：", app.Cfg.Version)
-	color.Green("    • 检查点保存 - 评论导出过程新增 .partial.json 进度文件")
-	color.Green("    • 自动刷新保护 - 导出期间临时锁住 15 分钟页面自动刷新")
-	color.Green("    • 误报修复 - 后端已成功导出时不再弹 Failed to fetch")
-	color.Green("    • 成功提示增强 - 直接显示一级评论、回复与合计条数")
 	fmt.Println()
 }
 

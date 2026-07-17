@@ -679,7 +679,7 @@ const checkProgress = setInterval(async () => {
 WX_CHANNEL_PORT=2025
 
 # 下载目录
-WX_CHANNEL_DOWNLOADS_DIR=downloads
+WX_CHANNEL_DOWNLOAD_DIR=downloads
 
 # 安全配置
 WX_CHANNEL_TOKEN=your_secret_token

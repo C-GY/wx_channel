@@ -50,6 +50,76 @@ type DownloadRecord struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+// ExportRecord 表示一次从视频号批量列表发起的 CSV 导出。
+// 未启用 OSS 的记录创建后立即可下载；启用 OSS 的记录只有在全部视频上传完成后才可下载。
+type ExportRecord struct {
+	ID               string     `json:"id"`
+	FileName         string     `json:"fileName"`
+	Status           string     `json:"status"` // processing, ready, failed
+	OSSUploadEnabled bool       `json:"ossUploadEnabled"`
+	TotalCount       int        `json:"totalCount"`
+	CompletedCount   int        `json:"completedCount"`
+	FailedCount      int        `json:"failedCount"`
+	ErrorMessage     string     `json:"errorMessage,omitempty"`
+	DownloadReady    bool       `json:"downloadReady"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	ReadyAt          *time.Time `json:"readyAt,omitempty"`
+}
+
+// ExportRecordStats 是控制台导出记录页展示的全量状态统计。
+type ExportRecordStats struct {
+	Total      int64 `json:"total"`
+	Processing int64 `json:"processing"`
+	Ready      int64 `json:"ready"`
+	Failed     int64 `json:"failed"`
+}
+
+// ExportRecordItem 保存 CSV 的一行数据以及对应下载、OSS 上传进度。
+type ExportRecordItem struct {
+	ExportRecordID   string    `json:"exportRecordId,omitempty"`
+	Position         int       `json:"position"`
+	VideoID          string    `json:"videoId"`
+	Title            string    `json:"title"`
+	Author           string    `json:"author"`
+	PublishTime      string    `json:"publishTime"`
+	OriginalVideoURL string    `json:"originalVideoUrl"`
+	OSSVideoURL      string    `json:"ossVideoUrl"`
+	CoverURL         string    `json:"coverUrl"`
+	DurationMs       int64     `json:"durationMs"`
+	FileSize         int64     `json:"fileSize"`
+	LikeCount        int64     `json:"likeCount"`
+	CommentCount     int64     `json:"commentCount"`
+	FavCount         int64     `json:"favCount"`
+	ForwardCount     int64     `json:"forwardCount"`
+	CapturedAt       string    `json:"capturedAt"`
+	DownloadStatus   string    `json:"downloadStatus"`
+	DownloadProgress float64   `json:"downloadProgress"`
+	DownloadedMB     float64   `json:"downloadedMB"`
+	TotalMB          float64   `json:"totalMB"`
+	OSSStatus        string    `json:"ossStatus"`
+	OSSProgress      float64   `json:"ossProgress"`
+	OSSUploadedBytes int64     `json:"ossUploadedBytes"`
+	OSSTotalBytes    int64     `json:"ossTotalBytes"`
+	OSSObjectKey     string    `json:"ossObjectKey"`
+	ErrorMessage     string    `json:"errorMessage,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+// OSSUploadQueueItem 是控制台 OSS 上传队列使用的聚合视图。
+type OSSUploadQueueItem struct {
+	ExportRecordItem
+	ExportFileName string `json:"exportFileName"`
+	ExportStatus   string `json:"exportStatus"`
+}
+
+const (
+	ExportStatusProcessing = "processing"
+	ExportStatusReady      = "ready"
+	ExportStatusFailed     = "failed"
+)
+
 // DownloadStatus 常量
 const (
 	DownloadStatusPending    = "pending"
@@ -97,7 +167,7 @@ const (
 // Settings 表示应用程序设置
 type Settings struct {
 	DownloadDir                 string `json:"downloadDir"`
-	DownloadFilenameWithVideoID bool `json:"downloadFilenameWithVideoId"`
+	DownloadFilenameWithVideoID bool   `json:"downloadFilenameWithVideoId"`
 	DownloadFilenameTemplate    string `json:"downloadFilenameTemplate,omitempty"`
 	ChunkSize                   int64  `json:"chunkSize"`
 	ConcurrentLimit             int    `json:"concurrentLimit"`

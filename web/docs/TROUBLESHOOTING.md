@@ -39,13 +39,12 @@
 **方法**：
 
 ```bash
-wx_channel.exe --uninstall
+wx_channel.exe uninstall
 ```
 
 如果卸载失败，可以手动删除：
 
 * Windows：证书管理器 → 受信任的根证书颁发机构 → 找到 "SunnyNet" 证书并删除
-* macOS：钥匙串访问 → 系统 → 找到 "SunnyNet" 证书并删除
 
 ### 代理连接问题
 
@@ -261,6 +260,19 @@ wx_channel.exe --uninstall
    * 在命令行中运行程序查看错误信息
    * 检查是否有依赖缺失
 
+#### 源码构建出现 CGO、`bool`、`MIB_TCPROW2` 或 `sqlite3_*` 错误
+
+**原因**：项目依赖 Windows CGO、SunnyNet 与两个 SQLite 实现，直接执行裸 `go build` 可能缺少兼容参数。
+
+**解决方案**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action test
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action build
+```
+
+不要使用 `CGO_ENABLED=0`。完整参数见[构建指南](BUILD.md)。
+
 #### 功能不完整
 
 **症状**：某些功能无法使用
@@ -274,7 +286,7 @@ wx_channel.exe --uninstall
 **解决方案**：
 
 1. **更新到最新版本**
-   * 检查当前版本：`wx_channel.exe -v`
+   * 检查当前版本：`wx_channel.exe version`
    * 下载最新版本
 2. **检查配置**
    * 查看 配置概览

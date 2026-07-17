@@ -283,4 +283,4 @@ downloads/
 - 程序默认选择最高质量的视频
 - 批量下载时使用默认最高质量
 
-更多问题请参考 [故障排除](TROUBLESHOOTING.md) 或 [常见问题](COMMON_ISSUES.md)。
+更多问题请参考 [故障排除](TROUBLESHOOTING.md)。

@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/nobiyou/wx_channel/releases"><img src="https://img.shields.io/github/v/release/nobiyou/wx_channel?style=flat-square&label=Version" alt="Release"></a>
   <a href="https://github.com/nobiyou/wx_channel/releases"><img src="https://img.shields.io/github/release-date/nobiyou/wx_channel?style=flat-square&label=Released" alt="Release Date"></a>
-  <img src="https://img.shields.io/badge/Go-1.23+-00ADD8.svg?style=flat-square&logo=go">
+  <img src="https://img.shields.io/badge/Go-1.24.3+-00ADD8.svg?style=flat-square&logo=go">
   <img src="https://img.shields.io/badge/Platform-Windows-lightgrey.svg?style=flat-square">
   <img src="https://img.shields.io/github/license/nobiyou/wx_channel?style=flat-square" alt="License">
   <a href="https://github.com/nobiyou/wx_channel/stargazers"><img src="https://img.shields.io/github/stars/nobiyou/wx_channel?style=flat-square" alt="Stars"></a>
@@ -88,12 +88,12 @@ Hub 服务端和 Hub 前端已经拆分到独立仓库：
 
 ### 三步开始使用
 
-```bash
+```powershell
 # 1️⃣ 下载程序
 # 访问 https://github.com/nobiyou/wx_channel/releases 下载最新版本
 
 # 2️⃣ 启动程序
-wx_channel.exe
+.\wx_channel.exe
 
 # 3️⃣ 打开视频号页面，点击下载按钮
 # 就这么简单！
@@ -103,7 +103,7 @@ wx_channel.exe
 
 1. **下载并启动**
    - 从 [Releases](https://github.com/nobiyou/wx_channel/releases) 下载最新版本
-   - 解压后双击 `wx_channel.exe` 启动
+   - 解压后在管理员 PowerShell 中运行 `.\wx_channel.exe`
 
 2. **安装证书**（首次使用）
    - 程序会自动尝试安装证书
@@ -114,7 +114,11 @@ wx_channel.exe
    - 页面会自动注入下载按钮
    - 点击按钮即可下载
 
-📖 **详细教程**：[使用文档](docs/README.md) | [开发文档](dev-docs/README.md) | [更新日志](CHANGELOG.md)
+4. **检查服务**（可选）
+   - Web 控制台：`http://127.0.0.1:2025/console`
+   - 健康检查：`http://127.0.0.1:2025/api/health`
+
+📖 **详细教程**：[使用文档](docs/README.md) | [构建指南](docs/BUILD.md) | [更新日志](CHANGELOG.md)
 
 ---
 
@@ -204,16 +208,18 @@ wx_channel.exe
 
 ### 方式二：从源码编译
 
-```bash
+```powershell
 # 克隆仓库
 git clone https://github.com/nobiyou/wx_channel.git
 cd wx_channel
 
-# 基本编译
-go build -o wx_channel.exe
+# 需要 Go 1.24.3+ 与支持 CGO 的 MinGW-w64/GCC
+# 脚本会补齐 SunnyNet 运行文件并设置已验证的 CGO 参数
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action test
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action build
 
-# 优化体积编译（推荐）
-go build -ldflags="-s -w" -o wx_channel_mini.exe
+# 从源码直接运行
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action run
 ```
 
 ---
@@ -222,22 +228,22 @@ go build -ldflags="-s -w" -o wx_channel_mini.exe
 
 ### 基础配置
 
-```bash
+```powershell
 # 修改代理端口
-wx_channel.exe -p 8080
+.\wx_channel.exe -p 8080
 
 # 查看版本
-wx_channel.exe -v
+.\wx_channel.exe version
 
 # 卸载证书
-wx_channel.exe --uninstall
+.\wx_channel.exe uninstall
 ```
 
 ### 环境变量
 
 ```bash
 # 下载目录
-WX_CHANNEL_DOWNLOADS_DIR=downloads
+WX_CHANNEL_DOWNLOAD_DIR=downloads
 
 # 日志配置
 WX_CHANNEL_LOG_FILE=logs/wx_channel.log
@@ -245,7 +251,7 @@ WX_CHANNEL_LOG_MAX_MB=5
 
 # 并发配置
 WX_CHANNEL_DOWNLOAD_CONCURRENCY=5
-WX_CHANNEL_DOWNLOAD_TIMEOUT=30
+WX_CHANNEL_DOWNLOAD_TIMEOUT=30m
 ```
 
 📖 **完整配置**：[配置文档](docs/CONFIGURATION.md)
@@ -259,20 +265,9 @@ WX_CHANNEL_DOWNLOAD_TIMEOUT=30
 
 - **快速开始**: [安装指南](docs/INSTALLATION.md) | [配置说明](docs/CONFIGURATION.md)
 - **功能使用**: [批量下载](docs/BATCH_DOWNLOAD_GUIDE.md) | [监控功能](docs/MONITORING_QUICKSTART.md)
-- **测试指南**: [前端测试](docs/FRONTEND_TEST_GUIDE.md)
 - **故障排除**: [常见问题](docs/TROUBLESHOOTING.md)
 
 📖 **查看所有用户文档**: [docs/INDEX.md](docs/INDEX.md)
-
-### 🔧 开发文档
-所有开发相关的文档都在 `dev-docs/` 目录：
-
-- **修复历史**: [FIX_HISTORY.md](dev-docs/FIX_HISTORY.md) - 所有修复记录 ⭐
-- **完整文档**: [DOCUMENTATION.md](dev-docs/DOCUMENTATION.md) - 项目完整文档
-- **API 文档**: [api_documentation.md](dev-docs/api_documentation.md) - API 接口文档
-- **优化记录**: WebSocket、超时、性能等优化文档
-
-📖 **查看所有开发文档**: [dev-docs/INDEX.md](dev-docs/INDEX.md)
 
 ### 快速入门
 - [安装指南](docs/INSTALLATION.md) - 详细的安装步骤
@@ -288,8 +283,8 @@ WX_CHANNEL_DOWNLOAD_TIMEOUT=30
 ### 开发文档
 - [构建指南](docs/BUILD.md) - 从源码构建
 - [配置说明](docs/CONFIGURATION.md) - 所有配置选项
+- [完整 API 文档](web/docs/API.md) - HTTP API 接口
 - [更新日志](CHANGELOG.md) - 版本更新记录
-- [技术文档](dev-docs/README.md) - 更多开发文档
 
 ---
 
@@ -394,7 +389,7 @@ WX_CHANNEL_DOWNLOAD_TIMEOUT=30
 
 ## 🙏 致谢
 
-- 开发者说明：仓库已内置 `SunnyNet v1.0.3` 源码，位于 [pkg/sunnynet](/pkg/sunnynet:1)。根模块通过 `go.mod` 的 `replace` 指向本地版本，便于其他开发者直接构建与调试。
+- 开发者说明：仓库已内置 `SunnyNet v1.0.3` 源码，位于 [`pkg/sunnynet`](pkg/sunnynet/)。根模块通过 `go.mod` 的 `replace` 指向本地版本，便于直接构建与调试。
 - [SunnyNet](https://github.com/qtgolang/SunnyNet) - HTTP/HTTPS 代理库
 - [Go](https://golang.org/) - 编程语言
 - 所有贡献者和支持者

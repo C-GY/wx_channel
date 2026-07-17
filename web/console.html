@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>视频号下载控制台</title>
     <link rel="icon" type="image/png" href="icon.png">
-    <link rel="stylesheet" href="css/app.css?v=1764987636">
+    <link rel="stylesheet" href="css/app.css?v=20260717152325">
 </head>
 
 <body>
@@ -66,6 +66,22 @@
                             <line x1="3" y1="18" x2="3.01" y2="18" />
                         </svg>
                         <span>下载队列</span>
+                    </a>
+                    <a class="nav-item" data-page="exports" onclick="navigateTo('exports')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                            <polyline points="14 2 14 8 20 8" />
+                            <polyline points="8 13 11 16 16 11" />
+                        </svg>
+                        <span>导出记录</span>
+                    </a>
+                    <a class="nav-item" data-page="oss-queue" onclick="navigateTo('oss-queue')">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M16 16l-4-4-4 4" />
+                            <path d="M12 12v9" />
+                            <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
+                        </svg>
+                        <span>OSS上传队列</span>
                     </a>
                 </div>
 
@@ -1023,6 +1039,90 @@
                 </div>
             </div>
 
+            <!-- CSV Export Records Page -->
+            <div class="page-view" id="page-exports">
+                <div class="alert alert-info" style="margin-bottom: 20px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        style="width: 20px; height: 20px; flex-shrink: 0;">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" y1="16" x2="12" y2="12" />
+                        <line x1="12" y1="8" x2="12.01" y2="8" />
+                    </svg>
+                    <span>未启用 OSS 的导出会立即下载；启用 OSS 的导出需要等待所有视频上传完成后，才能点击下载 CSV。</span>
+                </div>
+
+                <div class="stats-grid" style="margin-bottom: 20px;">
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">导出总数</div><div class="stat-value" id="exportStatTotal">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">处理中</div><div class="stat-value" id="exportStatProcessing" style="color: var(--warning-color);">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">可下载</div><div class="stat-value" id="exportStatReady" style="color: var(--success-color);">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">失败</div><div class="stat-value" id="exportStatFailed" style="color: var(--danger-color);">0</div></div></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">导出记录</h3>
+                        <button class="btn btn-secondary" onclick="loadExportRecords()">刷新</button>
+                    </div>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>文件名</th>
+                                    <th style="width: 120px;">导出模式</th>
+                                    <th style="width: 110px;">视频数量</th>
+                                    <th style="width: 180px;">处理进度</th>
+                                    <th style="width: 110px;">状态</th>
+                                    <th style="width: 170px;">创建时间</th>
+                                    <th style="width: 130px;">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="exportRecordTableBody">
+                                <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination" id="exportRecordPagination"></div>
+                </div>
+            </div>
+
+            <!-- OSS Upload Queue Page -->
+            <div class="page-view" id="page-oss-queue">
+                <div class="stats-grid" style="margin-bottom: 20px;">
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">上传任务</div><div class="stat-value" id="ossQueueStatTotal">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">等待中</div><div class="stat-value" id="ossQueueStatPending" style="color: var(--text-muted);">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">上传中</div><div class="stat-value" id="ossQueueStatUploading" style="color: var(--warning-color);">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">已完成</div><div class="stat-value" id="ossQueueStatDone" style="color: var(--success-color);">0</div></div></div>
+                    <div class="stat-card"><div class="stat-content"><div class="stat-label">失败</div><div class="stat-value" id="ossQueueStatFailed" style="color: var(--danger-color);">0</div></div></div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div>
+                            <h3 class="card-title">OSS上传队列</h3>
+                            <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">显示由 CSV 导出任务触发的视频下载与 OSS 上传进度</div>
+                        </div>
+                        <button class="btn btn-secondary" onclick="loadOSSUploadQueue()">刷新</button>
+                    </div>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>视频</th>
+                                    <th style="width: 180px;">所属导出</th>
+                                    <th style="width: 180px;">下载进度</th>
+                                    <th style="width: 180px;">OSS上传进度</th>
+                                    <th style="width: 120px;">状态</th>
+                                    <th style="width: 170px;">更新时间</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ossUploadQueueTableBody">
+                                <tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted);">加载中...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <!-- Settings Page - Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 13.7 -->
             <div class="page-view" id="page-settings">
                 <!-- Connection Settings - Requirements: 13.7 -->
@@ -1860,11 +1960,12 @@
     <div class="message-area" id="messageArea"></div>
 
     <!-- JS Modules -->
-    <script src="js/core.js?v=1764987636"></script>
-    <script src="js/ui.js?v=1764987636"></script>
+    <script src="js/core.js?v=20260717152325"></script>
+    <script src="js/ui.js?v=20260717152325"></script>
     <script src="js/radar.js?v=1764987636"></script>
     <script src="js/pages-browse.js?v=1764987636"></script>
     <script src="js/pages-download.js?v=1764987636"></script>
+    <script src="js/pages-export.js?v=20260717152325"></script>
     <script src="js/pages-settings.js?v=1764987636"></script>
     <script src="js/video-player.js?v=1764987636"></script>
 </body>

@@ -21,6 +21,7 @@ type APIRouter struct {
 	systemService      *api.SystemService
 	logsService        *api.LogsService
 	exportService      *api.ExportAPI
+	exportRecordAPI    *api.ExportRecordAPI
 	proxyService       *api.ProxyService
 	certificateService *api.CertificateService
 	versionService     *api.VersionAPI
@@ -62,6 +63,7 @@ func NewAPIRouter(cfg *config.Config, hub *websocket.Hub, sunny *SunnyNet.Sunny)
 		systemService:      api.NewSystemService(),
 		logsService:        api.NewLogsService(cfg),
 		exportService:      api.NewExportAPI(),
+		exportRecordAPI:    api.NewExportRecordAPI(),
 		proxyService:       api.NewProxyService(sunny, cfg.Port),
 		certificateService: api.NewCertificateService(sunny),
 		versionService:     api.NewVersionAPI(),
@@ -122,6 +124,11 @@ func (r *APIRouter) registerRoutes() {
 	// 控制台 API - 导出功能
 	r.mux.HandleFunc("/api/export/browse", r.exportService.HandleExportBrowseHistory)
 	r.mux.HandleFunc("/api/export/downloads", r.exportService.HandleExportDownloadRecords)
+
+	// 视频号批量 CSV 导出记录与 OSS 上传队列
+	r.mux.HandleFunc("/api/export-records", r.exportRecordAPI.HandleExportRecords)
+	r.mux.HandleFunc("/api/export-records/", r.exportRecordAPI.HandleExportRecords)
+	r.mux.HandleFunc("/api/oss-upload-queue", r.exportRecordAPI.HandleOSSUploadQueue)
 
 	// 控制台 API - 视频相关
 	r.mux.HandleFunc("/api/video/stream", r.consoleHandler.HandleVideoStream)

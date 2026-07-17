@@ -1,204 +1,147 @@
-# 安装指南
+# 安装与首次运行
 
-## 安装指南
+## 系统要求
 
-本指南将帮助您安装和配置微信视频号下载助手。
+- Windows 10 或更高版本（64 位推荐）
+- 最新版微信
+- 预编译版本无需安装开发工具
+- 从源码运行需要 Go `1.24.3+` 和支持 CGO 的 64 位 MinGW-w64/GCC
 
-### 前置要求
+## 方式一：运行预编译版本（推荐）
 
-* **操作系统**：Windows 10+
-* **Go 环境**：1.23+（仅当需要从源码编译时）
-* **微信版本**：最新版
+1. 从 [GitHub Releases](https://github.com/nobiyou/wx_channel/releases) 下载 `wx_channel.exe`。
+2. 解压到可写目录，例如 `C:\wx_channel`。
+3. 在该目录打开管理员 PowerShell。
+4. 启动：
 
-### 安装方式
-
-#### 方式一：使用预编译版本（推荐）
-
-1. **下载程序**
-   * 访问 [GitHub Releases](https://github.com/nobiyou/wx_channel/releases)
-   * 下载对应操作系统的最新版本
-   * Windows 用户下载 `wx_channel.exe`
-2. **解压文件**
-   * 将下载的文件解压到任意目录（如 `C:\wx_channel\` 或 `~/wx_channel/`）
-3. **运行程序**
-
-   ```bash
-   # Windows
-   wx_channel.exe
-   ```
-
-#### 方式二：从源码编译
-
-1. **安装 Go 环境**
-   * 访问 <https://golang.org/dl/> 下载并安装 Go 1.23+
-   * 验证安装：`go version`
-2. **克隆仓库**
-
-   ```bash
-   git clone https://github.com/nobiyou/wx_channel.git
-   cd wx_channel
-   ```
-3. **编译程序**
-
-   ```bash
-   # 基本编译
-   go build -o wx_channel.exe
-
-   # 优化体积编译（推荐）
-   go build -ldflags="-s -w" -o wx_channel_mini.exe
-   ```
-
-### 首次运行配置
-
-#### 1. 启动程序
-
-以管理员身份运行程序（Windows 推荐，便于自动安装证书）：
-
-```bash
-# Windows（以管理员身份运行 PowerShell 或 CMD）
-wx_channel.exe
+```powershell
+.\wx_channel.exe
 ```
 
-#### 2. 安装根证书
+管理员权限用于安装根证书和启动 `WeChatAppEx.exe` 进程注入。非管理员运行时，Web 控制台和本地 API 通常仍可使用，但视频号页面可能不会出现下载按钮。
 
-程序首次运行时会自动尝试安装根证书（SunnyRoot.cer）。
+## 方式二：从源码运行
 
-**自动安装成功**：
+### 1. 安装开发环境
 
-* 程序会显示 "✓ 证书安装成功！"
-* 重启浏览器后即可使用
+安装并验证 Go 与 GCC：
 
-**自动安装失败**：
-
-* 程序会将证书保存到 `downloads/SunnyRoot.cer`
-* 手动安装步骤：
-  1. 找到 `downloads/SunnyRoot.cer` 文件
-  2. 双击证书文件
-  3. 按照系统提示完成安装
-  4. 重新打开视频号
-
-#### 3. 配置代理
-
-**微信浏览器自动代理**
-
-1. 打开视频号
-2. 刷新页面
-3. 查看日志代理是否成功
-
-#### 4. 验证安装
-
-1. 打开微信视频号页面
-2. 刷新页面
-3. 如果看到注入的脚本和面板，说明安装成功
-
-### 自定义配置
-
-#### 更改代理端口
-
-如果默认端口 2025 被占用，可以更改：
-
-```bash
-# 命令行参数
-wx_channel.exe -p 8080
-
-# 或设置环境变量
-$env:WX_CHANNEL_PORT=8080  # Windows PowerShell
+```powershell
+go version
+gcc --version
+go env CGO_ENABLED CC CXX
 ```
 
-#### 自定义下载目录
+`CGO_ENABLED` 应为 `1`，编译器应为 `gcc` / `g++`。
 
-```bash
-# 设置环境变量
-$env:WX_CHANNEL_DOWNLOADS_DIR="D:\Videos"  # Windows
-```
+### 2. 获取源码
 
-#### 启用安全认证
-
-```bash
-# 设置授权令牌
-$env:WX_CHANNEL_TOKEN="your_secret_token"
-wx_channel.exe
-```
-
-更多配置选项请参考 配置概览。
-
-### 卸载
-
-#### 卸载证书
-
-```bash
-wx_channel.exe --uninstall
-```
-
-#### 删除程序
-
-1. 停止运行中的程序（Ctrl+C）
-2. 删除程序文件
-3. 删除下载目录（可选）：`downloads/`
-4. 删除日志目录（可选）：`logs/`
-
-### 升级
-
-#### 升级到新版本
-
-1. **备份数据**（可选）
-   * 备份 `downloads/` 目录
-   * 备份配置文件（如果有）
-2. **下载新版本**
-   * 从 GitHub Releases 下载最新版本
-   * 或重新编译源码
-3. **替换程序文件**
-   * 停止旧版本程序
-   * 替换可执行文件
-4. **运行新版本**
-   * 启动程序，配置会自动迁移
-
-#### 从源码升级
-
-```bash
+```powershell
+git clone https://github.com/nobiyou/wx_channel.git
 cd wx_channel
-git pull
-go build -ldflags="-s -w" -o wx_channel.exe
+go mod download
 ```
 
-### 常见安装问题
+### 3. 测试、构建或运行
 
-#### 证书安装失败
+```powershell
+# 全量测试
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action test
 
-**问题**：程序提示证书安装失败
+# 构建到 .tmp_runtime\wx_channel.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action build
 
-**解决方案**：
+# 从源码直接运行
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Action run
+```
 
-1. 确保以管理员身份运行（Windows）
-2. 手动安装证书：双击 `downloads/SunnyRoot.cer`
-3. 安装后重新打开视频号
+开发脚本会设置项目需要的 CGO 参数，并在缺失时从固定的 `SunnyNet v1.0.3` Go 模块恢复 `nfapi.dll`。完整说明见[构建指南](BUILD.md)。
 
-#### 代理无法连接
+## 首次运行
 
-**问题**：微信浏览器无法连接到代理
+### 根证书
 
-**解决方案**：
+程序会检测名为 `SunnyNet` 的根证书：
 
-1. 检查程序是否正在运行
-2. 检查端口是否被占用：`netstat -ano | findstr :2025`（Windows）
-3. 检查防火墙设置
-4. 尝试更改端口：`wx_channel.exe -p 8080`
+- 已存在：直接继续启动；
+- 可自动安装：日志显示“证书安装成功”；
+- 权限不足：证书保存为 `downloads\SunnyRoot.cer`，请手动安装到“受信任的根证书颁发机构”。
 
-#### 提示证书错误
+安装或更新证书后，重新打开微信视频号页面。
 
-**问题**：访问视频号时提示证书错误
+### 进程注入
 
-**解决方案**：
+成功日志应包含：
 
-1. 确认根证书已正确安装
-2. 重新打开视频号
-3. 清除浏览器缓存
-4. 检查系统时间是否正确
+```text
+视频号注入引擎已就绪 (WeChatAppEx.exe)
+```
 
-更多问题请参考 故障排除。
+如果出现“注入引擎启动失败”，关闭程序后在管理员 PowerShell 中重启。
 
-### 下一步
+## 验证服务
 
-* 配置概览 - 了解所有配置选项
-* 使用指南 - 学习如何使用程序
-* 故障排除 - 解决遇到的问题
+默认监听：
+
+- `2025`：代理、Web 控制台、本地 API
+- `2026`：WebSocket 与管理 API
+- `9090`：Prometheus 指标（启用时）
+
+检查健康状态：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:2025/api/health
+```
+
+返回 `success: true` 后，打开：
+
+```text
+http://127.0.0.1:2025/console
+```
+
+## 常用配置
+
+```powershell
+# 修改端口
+.\wx_channel.exe -p 8080
+
+# 修改下载目录
+$env:WX_CHANNEL_DOWNLOAD_DIR='D:\Videos'
+.\wx_channel.exe
+
+# 查看版本
+.\wx_channel.exe version
+```
+
+需要独立运行、避免连接可选 Hub 时，在 `config.yaml` 中设置：
+
+```yaml
+cloud_enabled: false
+radar_enabled: false
+hub_sync:
+  enabled: false
+  push_enabled: false
+```
+
+更多配置见[配置说明](CONFIGURATION.md)。
+
+## 停止与卸载
+
+前台运行时按 `Ctrl+C` 停止。
+
+卸载根证书：
+
+```powershell
+.\wx_channel.exe uninstall
+```
+
+随后可按需删除程序目录；`downloads\`、`logs\` 和 `config.yaml` 包含本地数据与设置，删除前请先备份。
+
+## 常见问题
+
+- 端口冲突：`Get-NetTCPConnection -LocalPort 2025`
+- 页面无按钮：确认管理员权限，并查看注入引擎日志
+- 控制台打不开：确认 `/api/health` 可访问
+- 源码构建失败：使用 `scripts\dev.ps1`，不要直接关闭 CGO
+
+更多信息见[故障排除](TROUBLESHOOTING.md)。
