@@ -950,7 +950,7 @@ function __batch_export_filename__(date) {
     '_' + pad(date.getHours()) + '-' + pad(date.getMinutes()) + '-' + pad(date.getSeconds()) + '.csv';
 }
 
-async function __create_batch_export_record__(videos, ossUploadEnabled, exportedAt) {
+async function __create_batch_export_record__(videos, ossUploadEnabled, exportedAt, autoSyncCreativeRadar) {
   var exportDate = __parse_batch_date__(exportedAt) || new Date();
   var response = await fetch('/api/export-records', {
     method: 'POST',
@@ -958,6 +958,7 @@ async function __create_batch_export_record__(videos, ossUploadEnabled, exported
     body: JSON.stringify({
       fileName: __batch_export_filename__(exportDate),
       ossUploadEnabled: !!ossUploadEnabled,
+      autoSyncCreativeRadar: autoSyncCreativeRadar === true,
       videos: __build_batch_export_record_items__(videos, exportedAt)
     })
   });
@@ -1016,24 +1017,8 @@ async function __get_batch_export_record_detail__(exportRecordId) {
   return data.record || data;
 }
 
-async function __start_batch_export_creative_radar_sync__(exportRecordId) {
-  var response = await fetch('/api/export-records/' + encodeURIComponent(exportRecordId) + '/creative-radar-sync', {
-    method: 'POST',
-    headers: __wx_channels_batch_api_headers__(),
-    body: '{}'
-  });
-  var result = await response.json().catch(function () { return {}; });
-  if (!response.ok || (typeof result.code === 'number' && result.code !== 0)) {
-    var error = new Error(result.message || result.error || '启动创意雷达同步失败');
-    error.httpStatus = response.status;
-    throw error;
-  }
-  return result.data || result;
-}
-
 async function __wait_batch_export_and_sync_creative_radar__(exportRecordId) {
   var deadline = Date.now() + 2 * 60 * 60 * 1000;
-  var syncRequested = false;
   while (Date.now() < deadline) {
     var record = await __get_batch_export_record_detail__(exportRecordId);
     if (record.status === 'failed') {
@@ -1044,17 +1029,6 @@ async function __wait_batch_export_and_sync_creative_radar__(exportRecordId) {
     }
     if (record.creativeRadarSyncStatus === 'failed') {
       throw new Error(record.creativeRadarSyncError || '创意雷达同步失败');
-    }
-    if (record.status === 'ready' && !syncRequested) {
-      try {
-        await __start_batch_export_creative_radar_sync__(exportRecordId);
-        syncRequested = true;
-        __wx_log({ msg: '📡 CSV 已生成，正在自动同步创意雷达系统...' });
-        continue;
-      } catch (error) {
-        // 409 表示另一个同步任务正在结束，稍后自动重试当前 CSV。
-        if (error.httpStatus !== 409) throw error;
-      }
     }
     await __batch_wait__(2000);
   }
@@ -1145,7 +1119,7 @@ async function __export_batch_video_csv__(options) {
   var exportedAt = new Date().toISOString();
   var exportRecord;
   try {
-    exportRecord = await __create_batch_export_record__(exportVideos, ossState.enabled, exportedAt);
+    exportRecord = await __create_batch_export_record__(exportVideos, ossState.enabled, exportedAt, autoSyncCreativeRadar);
     if (!ossState.enabled) {
       await __download_batch_export_record_csv__(exportRecord);
       __wx_log({

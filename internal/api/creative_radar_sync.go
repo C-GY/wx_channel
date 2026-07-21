@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,14 +42,20 @@ type CreativeRadarSyncJob struct {
 }
 
 type creativeRadarSyncController struct {
-	mu     sync.RWMutex
-	job    CreativeRadarSyncJob
-	client *creativeRadarClient
+	mu         sync.RWMutex
+	job        CreativeRadarSyncJob
+	client     *creativeRadarClient
+	autoMu     sync.Mutex
+	autoQueue  []string
+	autoQueued map[string]struct{}
+	autoWake   chan struct{}
 }
 
 func newCreativeRadarSyncController() *creativeRadarSyncController {
 	return &creativeRadarSyncController{
-		job: CreativeRadarSyncJob{Status: "idle"},
+		job:        CreativeRadarSyncJob{Status: "idle"},
+		autoQueued: make(map[string]struct{}),
+		autoWake:   make(chan struct{}, 1),
 		client: &creativeRadarClient{
 			endpoint: creativeRadarUploadURL,
 			apiKey:   creativeRadarAPIKey,
@@ -101,6 +108,103 @@ func (c *creativeRadarSyncController) finish() {
 	}
 }
 
+func (h *ExportRecordAPI) startCreativeRadarAutoWorker() {
+	if h == nil || h.creativeRadar == nil || h.repository == nil {
+		return
+	}
+	go h.runCreativeRadarAutoQueue()
+	records, err := h.repository.ListCreativeRadarAutoSyncCandidates()
+	if err != nil {
+		return
+	}
+	for _, record := range records {
+		h.enqueueCreativeRadarAutoSync(record.ID)
+	}
+}
+
+func (h *ExportRecordAPI) enqueueCreativeRadarAutoSync(exportRecordID string) {
+	controller := h.creativeRadar
+	exportRecordID = strings.TrimSpace(exportRecordID)
+	if controller == nil || exportRecordID == "" {
+		return
+	}
+	controller.autoMu.Lock()
+	if _, exists := controller.autoQueued[exportRecordID]; exists {
+		controller.autoMu.Unlock()
+		return
+	}
+	controller.autoQueued[exportRecordID] = struct{}{}
+	controller.autoQueue = append(controller.autoQueue, exportRecordID)
+	controller.autoMu.Unlock()
+	select {
+	case controller.autoWake <- struct{}{}:
+	default:
+	}
+}
+
+func (h *ExportRecordAPI) runCreativeRadarAutoQueue() {
+	controller := h.creativeRadar
+	for controller != nil {
+		controller.autoMu.Lock()
+		if len(controller.autoQueue) == 0 {
+			controller.autoMu.Unlock()
+			<-controller.autoWake
+			continue
+		}
+		exportRecordID := controller.autoQueue[0]
+		controller.autoQueue = controller.autoQueue[1:]
+		controller.autoMu.Unlock()
+
+		finished := h.tryStartCreativeRadarAutoSync(exportRecordID)
+
+		controller.autoMu.Lock()
+		if finished {
+			delete(controller.autoQueued, exportRecordID)
+		} else {
+			controller.autoQueue = append(controller.autoQueue, exportRecordID)
+		}
+		controller.autoMu.Unlock()
+		if !finished {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func (h *ExportRecordAPI) tryStartCreativeRadarAutoSync(exportRecordID string) bool {
+	record, err := h.repository.GetByID(exportRecordID)
+	if err != nil {
+		return false
+	}
+	if record == nil || !record.CreativeRadarAutoSync {
+		return true
+	}
+	if record.CreativeRadarSyncStatus == database.CreativeRadarSyncSuccess ||
+		record.CreativeRadarSyncStatus == database.CreativeRadarSyncFailed {
+		return true
+	}
+	switch record.Status {
+	case database.ExportStatusFailed:
+		message := strings.TrimSpace(record.ErrorMessage)
+		if message == "" {
+			message = "CSV 生成失败，无法自动同步创意雷达"
+		}
+		_ = h.repository.FinishCreativeRadarSync(record.ID, false, 0, record.TotalCount, 0, 0, message)
+		return true
+	case database.ExportStatusReady:
+		_, beginErr := h.beginCreativeRadarRecords([]database.ExportRecord{*record})
+		if errors.Is(beginErr, errCreativeRadarSyncBusy) {
+			return false
+		}
+		if beginErr != nil {
+			_ = h.repository.FinishCreativeRadarSync(record.ID, false, 0, record.TotalCount, 0, 0,
+				"启动自动同步失败: "+beginErr.Error())
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *ExportRecordAPI) startCreativeRadarSync(w http.ResponseWriter) {
 	records, err := h.repository.ListCreativeRadarSyncCandidates()
 	if err != nil {
@@ -140,19 +244,31 @@ func (h *ExportRecordAPI) startSingleCreativeRadarSync(w http.ResponseWriter, ex
 }
 
 func (h *ExportRecordAPI) startCreativeRadarRecords(w http.ResponseWriter, records []database.ExportRecord) {
+	job, err := h.beginCreativeRadarRecords(records)
+	if err != nil {
+		if errors.Is(err, errCreativeRadarSyncBusy) {
+			response.ErrorWithStatus(w, http.StatusConflict, http.StatusConflict, err.Error())
+			return
+		}
+		response.ErrorWithStatus(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.Success(w, job)
+}
+
+var errCreativeRadarSyncBusy = errors.New("创意雷达同步任务正在运行")
+
+func (h *ExportRecordAPI) beginCreativeRadarRecords(records []database.ExportRecord) (CreativeRadarSyncJob, error) {
 	controller := h.creativeRadar
 	if controller == nil {
-		response.ErrorWithStatus(w, http.StatusInternalServerError, http.StatusInternalServerError, "创意雷达同步服务未初始化")
-		return
+		return CreativeRadarSyncJob{}, fmt.Errorf("创意雷达同步服务未初始化")
 	}
 
 	controller.mu.Lock()
 	if controller.job.Status == "running" {
 		job := controller.job
 		controller.mu.Unlock()
-		response.ErrorWithStatus(w, http.StatusConflict, http.StatusConflict,
-			fmt.Sprintf("同步任务正在进行（%d/%d 个 CSV）", job.CompletedRecords, job.TotalRecords))
-		return
+		return job, fmt.Errorf("%w（%d/%d 个 CSV）", errCreativeRadarSyncBusy, job.CompletedRecords, job.TotalRecords)
 	}
 	// Re-read under the job lock so two near-simultaneous requests cannot use a
 	// stale candidate list and synchronize an already successful CSV twice.
@@ -161,8 +277,7 @@ func (h *ExportRecordAPI) startCreativeRadarRecords(w http.ResponseWriter, recor
 		record, err := h.repository.GetByID(candidate.ID)
 		if err != nil {
 			controller.mu.Unlock()
-			response.ErrorWithStatus(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-			return
+			return CreativeRadarSyncJob{}, err
 		}
 		if record != nil && record.Status == database.ExportStatusReady &&
 			record.CreativeRadarSyncStatus != database.CreativeRadarSyncSuccess {
@@ -184,19 +299,17 @@ func (h *ExportRecordAPI) startCreativeRadarRecords(w http.ResponseWriter, recor
 		job.Message = "没有需要同步的可下载 CSV"
 		controller.job = job
 		controller.mu.Unlock()
-		response.Success(w, job)
-		return
+		return job, nil
 	}
 	if err := h.repository.PrepareCreativeRadarSync(records); err != nil {
 		controller.mu.Unlock()
-		response.ErrorWithStatus(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
-		return
+		return CreativeRadarSyncJob{}, err
 	}
 	controller.job = job
 	controller.mu.Unlock()
 
 	go h.runCreativeRadarSync(records)
-	response.Success(w, job)
+	return job, nil
 }
 
 func (h *ExportRecordAPI) runCreativeRadarSync(records []database.ExportRecord) {

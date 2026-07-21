@@ -119,6 +119,77 @@ func TestCreativeRadarSyncContinuesAfterAnIndependentCSVFails(t *testing.T) {
 	}
 }
 
+func TestCreativeRadarAutoQueueWaitsForReadyExportAndSynchronizes(t *testing.T) {
+	if err := database.Initialize(&database.Config{DBPath: filepath.Join(t.TempDir(), "creative-radar-auto.db")}); err != nil {
+		t.Fatalf("initialize database: %v", err)
+	}
+	defer database.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"msg":"ok","data":{"total":1,"inserted":[101],"updated":[],"errors":[]}}`))
+	}))
+	defer server.Close()
+
+	repo := database.NewExportRecordRepository()
+	record := &database.ExportRecord{
+		ID:                    "auto-ready-export",
+		FileName:              "auto-ready.csv",
+		OSSUploadEnabled:      true,
+		CreativeRadarAutoSync: true,
+	}
+	items := []database.ExportRecordItem{{
+		VideoID:          "auto-video",
+		Title:            "auto video",
+		Author:           "author",
+		OriginalVideoURL: "https://finder.example/auto.mp4",
+		CoverURL:         "https://finder.example/cover.jpg",
+	}}
+	if err := repo.Create(record, items); err != nil {
+		t.Fatalf("create automatic export: %v", err)
+	}
+
+	api := &ExportRecordAPI{
+		repository:    repo,
+		now:           time.Now,
+		creativeRadar: newCreativeRadarSyncController(),
+	}
+	api.creativeRadar.client.endpoint = server.URL
+	api.creativeRadar.client.apiKey = "test-key"
+	api.startCreativeRadarAutoWorker()
+
+	if err := repo.UpdateItemProgress(record.ID, "auto-video", database.ExportItemProgressUpdate{
+		DownloadStatus:   "done",
+		DownloadProgress: 100,
+		FileSize:         1024,
+		OSSStatus:        "done",
+		OSSProgress:      100,
+		OSSUploadedBytes: 1024,
+		OSSTotalBytes:    1024,
+		OSSObjectKey:     "wechat_channel/2026-07-21/auto-video.mp4",
+		OSSVideoURL:      "https://oss.example/auto-video.mp4",
+	}); err != nil {
+		t.Fatalf("complete automatic export: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		stored, err := repo.GetByID(record.ID)
+		if err != nil {
+			t.Fatalf("read automatic export: %v", err)
+		}
+		if stored.CreativeRadarSyncStatus == database.CreativeRadarSyncSuccess {
+			if stored.CreativeRadarInserted != 1 || stored.CreativeRadarSyncCompleted != 1 {
+				t.Fatalf("unexpected automatic sync result: %#v", stored)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stored, _ := repo.GetByID(record.ID)
+	t.Fatalf("automatic sync did not finish: %#v", stored)
+}
+
 func TestCreativeRadarClientUploadsExpectedEnvelope(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {

@@ -358,6 +358,29 @@ CREATE INDEX IF NOT EXISTS idx_export_records_creative_radar_sync_status
     ON export_records(creative_radar_sync_status, created_at DESC);
 `,
 	},
+	{
+		Version:     17,
+		Description: "Persist automatic Creative Radar synchronization requests",
+		Up: `
+ALTER TABLE export_records ADD COLUMN creative_radar_auto_sync INTEGER NOT NULL DEFAULT 0;
+
+-- Records created by the previous version could become ready after their page
+-- was closed, so no browser remained to start synchronization. Migrate those
+-- existing OSS records into the durable backend queue once.
+UPDATE export_records
+SET creative_radar_auto_sync = 1,
+    creative_radar_sync_status = CASE
+        WHEN creative_radar_sync_status = 'not_synced' THEN 'pending'
+        ELSE creative_radar_sync_status
+    END
+WHERE oss_upload_enabled = 1
+  AND status IN ('processing', 'ready')
+  AND creative_radar_sync_status IN ('not_synced', 'pending');
+
+CREATE INDEX IF NOT EXISTS idx_export_records_creative_radar_auto_sync
+    ON export_records(creative_radar_auto_sync, creative_radar_sync_status, created_at ASC);
+`,
+	},
 }
 
 // runMigrations 执行所有待处理的迁移

@@ -151,6 +151,39 @@ func TestExportRecordRepositoryCreativeRadarSyncLifecycle(t *testing.T) {
 	}
 }
 
+func TestExportRecordRepositoryPersistsAutomaticCreativeRadarQueue(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewExportRecordRepository()
+	record := &ExportRecord{
+		ID:                    "auto-radar-export",
+		FileName:              "auto-radar.csv",
+		OSSUploadEnabled:      true,
+		CreativeRadarAutoSync: true,
+	}
+	if err := repo.Create(record, exportRecordTestItems()); err != nil {
+		t.Fatalf("create automatic Creative Radar export: %v", err)
+	}
+	if record.CreativeRadarSyncStatus != CreativeRadarSyncPending || !record.CreativeRadarAutoSync {
+		t.Fatalf("automatic sync request was not persisted: %#v", record)
+	}
+	candidates, err := repo.ListCreativeRadarAutoSyncCandidates()
+	if err != nil || len(candidates) != 1 || candidates[0].ID != record.ID {
+		t.Fatalf("unexpected automatic sync candidates: %#v, error: %v", candidates, err)
+	}
+	if err := repo.RecoverInterruptedCreativeRadarSync(); err != nil {
+		t.Fatalf("recover interrupted sync: %v", err)
+	}
+	stored, err := repo.GetByID(record.ID)
+	if err != nil {
+		t.Fatalf("read automatic sync record: %v", err)
+	}
+	if stored.CreativeRadarSyncStatus != CreativeRadarSyncPending {
+		t.Fatalf("pending automatic queue entry should survive restart: %#v", stored)
+	}
+}
+
 func TestExportRecordRepositoryRecoversInterruptedCreativeRadarSync(t *testing.T) {
 	cleanup := setupTestDB(t)
 	defer cleanup()

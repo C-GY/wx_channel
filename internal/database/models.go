@@ -62,6 +62,7 @@ type ExportRecord struct {
 	FailedCount                int        `json:"failedCount"`
 	ErrorMessage               string     `json:"errorMessage,omitempty"`
 	DownloadReady              bool       `json:"downloadReady"`
+	CreativeRadarAutoSync      bool       `json:"creativeRadarAutoSync"`
 	CreativeRadarSyncStatus    string     `json:"creativeRadarSyncStatus"` // not_synced, pending, syncing, success, failed
 	CreativeRadarSyncTotal     int        `json:"creativeRadarSyncTotal"`
 	CreativeRadarSyncCompleted int        `json:"creativeRadarSyncCompleted"`

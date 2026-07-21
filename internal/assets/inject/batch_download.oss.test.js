@@ -168,8 +168,12 @@ function loadBatchDownloadModule() {
       if (method === 'POST' && url === '/api/export-records') {
         exportSequence += 1;
         const body = JSON.parse(options.body);
+        const exportRecordId = `export-${exportSequence}`;
+        if (body.autoSyncCreativeRadar) {
+          creativeRadarSyncStates[exportRecordId] = 'success';
+        }
         return response({
-          id: `export-${exportSequence}`,
+          id: exportRecordId,
           fileName: body.fileName,
           status: body.ossUploadEnabled ? 'processing' : 'ready',
           downloadReady: !body.ossUploadEnabled,
@@ -330,9 +334,11 @@ async function main() {
   });
   const autoCreateRequests = requests.filter(request => request.method === 'POST' && request.url === '/api/export-records');
   const autoExportId = `export-${autoCreateRequests.length}`;
+  const autoCreateBody = JSON.parse(autoCreateRequests.at(-1).options.body);
+  assert(autoCreateBody.autoSyncCreativeRadar, 'Creative Radar button should persist the automatic-sync request on the export record');
   assert(
-    requests.some(request => request.method === 'POST' && request.url === `/api/export-records/${autoExportId}/creative-radar-sync`),
-    'Creative Radar button should automatically synchronize its CSV after the record becomes ready',
+    !requests.some(request => request.method === 'POST' && request.url === `/api/export-records/${autoExportId}/creative-radar-sync`),
+    'automatic Creative Radar synchronization should be owned by the backend rather than a page polling request',
   );
   assertEqual(elements['batch-sync-creative-radar-btn'].textContent, '同步创意雷达系统', 'Creative Radar button text should reset after completion');
 

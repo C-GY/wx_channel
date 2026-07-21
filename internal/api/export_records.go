@@ -29,11 +29,13 @@ type ExportRecordAPI struct {
 func NewExportRecordAPI() *ExportRecordAPI {
 	repository := database.NewExportRecordRepository()
 	_ = repository.RecoverInterruptedCreativeRadarSync()
-	return &ExportRecordAPI{
+	api := &ExportRecordAPI{
 		repository:    repository,
 		now:           time.Now,
 		creativeRadar: newCreativeRadarSyncController(),
 	}
+	api.startCreativeRadarAutoWorker()
+	return api
 }
 
 func (h *ExportRecordAPI) HandleExportRecords(w http.ResponseWriter, r *http.Request) {
@@ -125,9 +127,10 @@ func (h *ExportRecordAPI) HandleOSSUploadQueue(w http.ResponseWriter, r *http.Re
 
 func (h *ExportRecordAPI) createExportRecord(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		FileName         string                      `json:"fileName"`
-		OSSUploadEnabled bool                        `json:"ossUploadEnabled"`
-		Videos           []database.ExportRecordItem `json:"videos"`
+		FileName              string                      `json:"fileName"`
+		OSSUploadEnabled      bool                        `json:"ossUploadEnabled"`
+		AutoSyncCreativeRadar bool                        `json:"autoSyncCreativeRadar"`
+		Videos                []database.ExportRecordItem `json:"videos"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024*1024))
 	if err := decoder.Decode(&request); err != nil {
@@ -185,13 +188,17 @@ func (h *ExportRecordAPI) createExportRecord(w http.ResponseWriter, r *http.Requ
 	}
 
 	record := &database.ExportRecord{
-		ID:               uuid.NewString(),
-		FileName:         fileName,
-		OSSUploadEnabled: request.OSSUploadEnabled,
+		ID:                    uuid.NewString(),
+		FileName:              fileName,
+		OSSUploadEnabled:      request.OSSUploadEnabled,
+		CreativeRadarAutoSync: request.AutoSyncCreativeRadar,
 	}
 	if err := h.repository.Create(record, request.Videos); err != nil {
 		response.ErrorWithStatus(w, http.StatusInternalServerError, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if record.CreativeRadarAutoSync {
+		h.enqueueCreativeRadarAutoSync(record.ID)
 	}
 	response.Success(w, record)
 }
