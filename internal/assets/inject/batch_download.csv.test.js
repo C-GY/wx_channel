@@ -196,6 +196,11 @@ function main() {
 
   const recordItems = sandbox.__build_batch_export_record_items__([video], '2026-07-17 15:23:25');
   assertEqual(recordItems[0].capturedAt, sandbox.__format_batch_csv_captured_at__(capturedAt), 'export record should persist the formatted capturedAt value');
+  const nestedCoverItems = sandbox.__build_batch_export_record_items__([{
+    id: 'nested-cover',
+    objectDesc: { media: [{ coverUrl: 'https://finder.video.qq.com/nested-cover.jpg' }] },
+  }], capturedAt);
+  assertEqual(nestedCoverItems[0].coverUrl, 'https://finder.video.qq.com/nested-cover.jpg', 'export record should retain a nested media cover URL');
 
   const prepared = sandbox.__prepare_batch_download_entries__([
     video,

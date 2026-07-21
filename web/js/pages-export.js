@@ -8,7 +8,9 @@ const exportRecordState = {
     pageSize: 20,
     total: 0,
     totalPages: 1,
-    stats: { total: 0, processing: 0, ready: 0, failed: 0 }
+    stats: { total: 0, processing: 0, ready: 0, failed: 0 },
+    creativeRadarSyncJob: { status: 'idle', totalRecords: 0, completedRecords: 0, successRecords: 0, failedRecords: 0 },
+    activeCreativeRadarJobId: ''
 };
 
 let exportPagePollTimer = null;
@@ -46,7 +48,7 @@ async function loadExportRecords(silent = false) {
     const body = document.getElementById('exportRecordTableBody');
     if (!body) return;
     if (!silent) {
-        body.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted);">加载中...</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--text-muted);">加载中...</td></tr>';
     }
     try {
         const result = unwrapExportAPIResult(await ApiClient.getExportRecords({
@@ -62,16 +64,26 @@ async function loadExportRecords(silent = false) {
             ready: 0,
             failed: 0
         };
+        const previousJob = exportRecordState.creativeRadarSyncJob;
+        const nextJob = result?.creativeRadarSyncJob || { status: 'idle' };
+        exportRecordState.creativeRadarSyncJob = nextJob;
+        if (exportRecordState.activeCreativeRadarJobId &&
+            nextJob.id === exportRecordState.activeCreativeRadarJobId &&
+            previousJob?.status === 'running' && nextJob.status === 'completed') {
+            showMessage(nextJob.message || '创意雷达同步完成', Number(nextJob.failedRecords || 0) > 0 ? 'error' : 'success');
+            exportRecordState.activeCreativeRadarJobId = '';
+        }
         renderExportRecords();
         renderExportRecordPagination();
         updateExportRecordStats();
+        renderCreativeRadarSyncJob();
         if (!exportPagePollTimer && typeof currentPage !== 'undefined' && currentPage === 'exports') {
             startExportPagePolling('exports');
         }
     } catch (error) {
         console.error('加载导出记录失败:', error);
         if (!silent) {
-            body.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--danger-color);">${escapeHtml(error.message)}</td></tr>`;
+            body.innerHTML = `<tr><td colspan="8" style="text-align:center;padding:40px;color:var(--danger-color);">${escapeHtml(error.message)}</td></tr>`;
             showMessage('加载导出记录失败: ' + error.message, 'error');
         }
     }
@@ -81,7 +93,7 @@ function renderExportRecords() {
     const body = document.getElementById('exportRecordTableBody');
     if (!body) return;
     if (!exportRecordState.records.length) {
-        body.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:48px;color:var(--text-muted);">暂无 CSV 导出记录</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" style="text-align:center;padding:48px;color:var(--text-muted);">暂无 CSV 导出记录</td></tr>';
         return;
     }
 
@@ -112,6 +124,7 @@ function renderExportRecords() {
                     <div class="csv-export-progress-label">${escapeHtml(progressText)}</div>
                 </td>
                 <td><span class="download-status ${status.className}">${status.text}</span></td>
+                <td>${renderCreativeRadarRecordSync(record)}</td>
                 <td>${formatExportPageDate(record.createdAt)}</td>
                 <td>
                     <button class="btn btn-primary" style="padding:7px 12px;font-size:12px;" onclick="downloadExportRecordCSV('${escapeHtml(record.id)}')"
@@ -121,6 +134,100 @@ function renderExportRecords() {
                 </td>
             </tr>`;
     }).join('');
+}
+
+function renderCreativeRadarRecordSync(record) {
+    if (record.status !== 'ready') {
+        return '<span class="download-status pending">等待可下载</span>';
+    }
+    const status = record.creativeRadarSyncStatus || 'not_synced';
+    const total = Number(record.creativeRadarSyncTotal || record.totalCount || 0);
+    const completed = Number(record.creativeRadarSyncCompleted || 0);
+    const failed = Number(record.creativeRadarSyncFailed || 0);
+    const inserted = Number(record.creativeRadarInserted || 0);
+    const updated = Number(record.creativeRadarUpdated || 0);
+    const progress = total > 0 ? clampExportProgress(completed / total * 100) : 0;
+
+    if (status === 'success') {
+        return `
+            <span class="download-status completed">同步成功</span>
+            <div class="creative-radar-result">${formatNumber(completed)} 条 · 新增 ${formatNumber(inserted)} / 更新 ${formatNumber(updated)}</div>
+            ${record.creativeRadarSyncedAt ? `<div class="creative-radar-result">${formatExportPageDate(record.creativeRadarSyncedAt)}</div>` : ''}`;
+    }
+    if (status === 'failed') {
+        return `
+            <span class="download-status failed">同步失败</span>
+            <div class="creative-radar-result">已处理 ${formatNumber(completed)}/${formatNumber(total)}${failed ? ` · 失败 ${formatNumber(failed)}` : ''}</div>
+            ${record.creativeRadarSyncError ? `<div class="creative-radar-error" title="${escapeHtml(record.creativeRadarSyncError)}">${escapeHtml(record.creativeRadarSyncError)}</div>` : ''}`;
+    }
+    if (status === 'syncing') {
+        return `
+            <span class="download-status in_progress">正在同步</span>
+            ${renderExportProgress(progress, `${completed}/${total}`, false)}`;
+    }
+    if (status === 'pending') {
+        return '<span class="download-status pending">等待同步</span>';
+    }
+    return '<span class="download-status pending">未同步</span>';
+}
+
+function renderCreativeRadarSyncJob() {
+    const panel = document.getElementById('creativeRadarSyncPanel');
+    const title = document.getElementById('creativeRadarSyncTitle');
+    const detail = document.getElementById('creativeRadarSyncDetail');
+    const fill = document.getElementById('creativeRadarSyncProgressFill');
+    const button = document.getElementById('creativeRadarSyncButton');
+    const job = exportRecordState.creativeRadarSyncJob || { status: 'idle' };
+    const running = job.status === 'running';
+
+    if (button) {
+        button.disabled = running;
+        button.textContent = running ? '正在同步...' : '同步创意雷达系统';
+    }
+    if (!panel) return;
+    if (job.status === 'idle') {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = 'block';
+    const total = Number(job.totalRecords || 0);
+    const completed = Number(job.completedRecords || 0);
+    const success = Number(job.successRecords || 0);
+    const failed = Number(job.failedRecords || 0);
+    const progress = total > 0 ? clampExportProgress(completed / total * 100) : 100;
+    if (fill) {
+        fill.style.width = `${progress}%`;
+        fill.classList.toggle('failed', job.status === 'completed' && failed > 0);
+    }
+    if (title) {
+        title.textContent = running ? `正在同步 ${completed}/${total} 个 CSV` : (job.message || '创意雷达同步完成');
+    }
+    if (detail) {
+        detail.textContent = running
+            ? `${job.currentFileName ? `当前：${job.currentFileName} · ` : ''}成功 ${success}，失败 ${failed}`
+            : `共 ${total} 个 CSV，成功 ${success}，失败 ${failed}${job.finishedAt ? ` · ${formatExportPageDate(job.finishedAt)}` : ''}`;
+    }
+}
+
+async function syncCreativeRadarRecords() {
+    const button = document.getElementById('creativeRadarSyncButton');
+    if (button) button.disabled = true;
+    try {
+        const job = unwrapExportAPIResult(await ApiClient.syncCreativeRadar());
+        exportRecordState.creativeRadarSyncJob = job || { status: 'idle' };
+        exportRecordState.activeCreativeRadarJobId = job?.status === 'running' ? (job.id || '') : '';
+        renderCreativeRadarSyncJob();
+        if (job?.totalRecords > 0) {
+            showMessage(`已开始同步 ${job.totalRecords} 个可下载 CSV`, 'success');
+        } else {
+            showMessage(job?.message || '没有需要同步的可下载 CSV', 'info');
+        }
+        await loadExportRecords(true);
+    } catch (error) {
+        showMessage('启动创意雷达同步失败: ' + error.message, 'error');
+        if (button) button.disabled = false;
+        await loadExportRecords(true);
+    }
 }
 
 function exportRecordStatus(status) {

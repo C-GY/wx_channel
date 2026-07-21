@@ -341,6 +341,23 @@ CREATE INDEX IF NOT EXISTS idx_export_record_items_position ON export_record_ite
 CREATE INDEX IF NOT EXISTS idx_export_record_items_oss_status ON export_record_items(oss_status, updated_at DESC);
 `,
 	},
+	{
+		Version:     16,
+		Description: "Add Creative Radar synchronization state to CSV export records",
+		Up: `
+ALTER TABLE export_records ADD COLUMN creative_radar_sync_status TEXT NOT NULL DEFAULT 'not_synced';
+ALTER TABLE export_records ADD COLUMN creative_radar_sync_total INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE export_records ADD COLUMN creative_radar_sync_completed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE export_records ADD COLUMN creative_radar_sync_failed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE export_records ADD COLUMN creative_radar_inserted INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE export_records ADD COLUMN creative_radar_updated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE export_records ADD COLUMN creative_radar_sync_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE export_records ADD COLUMN creative_radar_synced_at DATETIME;
+
+CREATE INDEX IF NOT EXISTS idx_export_records_creative_radar_sync_status
+    ON export_records(creative_radar_sync_status, created_at DESC);
+`,
+	},
 }
 
 // runMigrations 执行所有待处理的迁移

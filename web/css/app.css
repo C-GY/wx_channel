@@ -2410,6 +2410,38 @@ select.filter-btn:focus {
     white-space: nowrap;
 }
 
+.creative-radar-sync-panel {
+    padding: 18px 20px;
+    border: 1px solid var(--border-color);
+}
+
+.creative-radar-sync-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.creative-radar-sync-detail,
+.creative-radar-result {
+    margin-top: 5px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.creative-radar-error {
+    max-width: 230px;
+    margin-top: 5px;
+    overflow: hidden;
+    color: var(--danger-color);
+    font-size: 11px;
+    line-height: 1.45;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* ============================================
    Form Elements - 表单元素
    ============================================ */

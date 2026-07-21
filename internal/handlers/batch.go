@@ -40,17 +40,28 @@ type batchOSSProgressUploader interface {
 	) (services.OSSUploadResult, error)
 }
 
+type batchQueueItem struct {
+	ID              string
+	Tasks           []BatchTask
+	ForceRedownload bool
+	OSSUploader     batchOSSUploader
+}
+
 // BatchHandler 批量下载处理器
 type BatchHandler struct {
-	downloadService *services.DownloadRecordService
-	settingsRepo    *database.SettingsRepository
-	exportRepo      *database.ExportRecordRepository
-	gopeedService   *services.GopeedService // Injected Gopeed Service
-	mu              sync.RWMutex
-	tasks           []BatchTask
-	running         bool
-	cancelFunc      context.CancelFunc // 用于取消时立即中断下载
-	ossUploader     batchOSSUploader   // 当前批次使用的 OSS 上传器（不对前端暴露凭证）
+	downloadService  *services.DownloadRecordService
+	settingsRepo     *database.SettingsRepository
+	exportRepo       *database.ExportRecordRepository
+	gopeedService    *services.GopeedService // Injected Gopeed Service
+	mu               sync.RWMutex
+	tasks            []BatchTask
+	currentBatchID   string
+	pendingBatches   []batchQueueItem
+	completedBatches map[string][]BatchTask
+	completedOrder   []string
+	running          bool
+	cancelFunc       context.CancelFunc // 用于取消时立即中断下载
+	ossUploader      batchOSSUploader   // 当前批次使用的 OSS 上传器（不对前端暴露凭证）
 }
 
 // BatchTask 批量下载任务
@@ -182,11 +193,13 @@ func (t *BatchTask) GetCover() string {
 // NewBatchHandler 创建批量下载处理器
 func NewBatchHandler(cfg *config.Config, gopeedService *services.GopeedService) *BatchHandler {
 	return &BatchHandler{
-		downloadService: services.NewDownloadRecordService(),
-		settingsRepo:    database.NewSettingsRepository(),
-		exportRepo:      database.NewExportRecordRepository(),
-		gopeedService:   gopeedService,
-		tasks:           make([]BatchTask, 0),
+		downloadService:  services.NewDownloadRecordService(),
+		settingsRepo:     database.NewSettingsRepository(),
+		exportRepo:       database.NewExportRecordRepository(),
+		gopeedService:    gopeedService,
+		tasks:            make([]BatchTask, 0),
+		pendingBatches:   make([]batchQueueItem, 0),
+		completedBatches: make(map[string][]BatchTask),
 	}
 }
 
@@ -391,6 +404,95 @@ func (h *BatchHandler) cleanupTaskArtifacts(taskID, tempPath string, removeFiles
 	}
 }
 
+func batchTasksHavePending(tasks []BatchTask) bool {
+	for _, task := range tasks {
+		if task.Status != "done" && task.Status != "failed" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *BatchHandler) enqueueBatch(batch batchQueueItem) (oldTasks []BatchTask, queuePosition int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	busy := h.running || h.cancelFunc != nil || batchTasksHavePending(h.tasks)
+	if busy {
+		h.pendingBatches = append(h.pendingBatches, batch)
+		return nil, len(h.pendingBatches)
+	}
+
+	oldTasks = append([]BatchTask(nil), h.tasks...)
+	h.tasks = batch.Tasks
+	h.currentBatchID = batch.ID
+	h.ossUploader = batch.OSSUploader
+	h.running = true
+	return oldTasks, 0
+}
+
+func (h *BatchHandler) promoteNextBatchLocked() (batchQueueItem, bool) {
+	if len(h.pendingBatches) == 0 {
+		return batchQueueItem{}, false
+	}
+	queued := h.pendingBatches[0]
+	h.pendingBatches = h.pendingBatches[1:]
+	h.tasks = queued.Tasks
+	h.currentBatchID = queued.ID
+	h.ossUploader = queued.OSSUploader
+	h.running = true
+	return queued, true
+}
+
+func (h *BatchHandler) archiveBatchLocked(batchID string, tasks []BatchTask) {
+	if strings.TrimSpace(batchID) == "" {
+		return
+	}
+	if h.completedBatches == nil {
+		h.completedBatches = make(map[string][]BatchTask)
+	}
+	if _, exists := h.completedBatches[batchID]; !exists {
+		h.completedOrder = append(h.completedOrder, batchID)
+	}
+	h.completedBatches[batchID] = append([]BatchTask(nil), tasks...)
+
+	const completedBatchLimit = 100
+	for len(h.completedOrder) > completedBatchLimit {
+		oldestID := h.completedOrder[0]
+		h.completedOrder = h.completedOrder[1:]
+		delete(h.completedBatches, oldestID)
+	}
+}
+
+// finishBatchDownload releases the current runner and, only after a terminal
+// batch result, promotes the next queued batch. A paused batch keeps ownership
+// of the runner so it can be resumed without losing its task state.
+func (h *BatchHandler) finishBatchDownload(cancel context.CancelFunc, advanceQueue bool) {
+	cancel()
+
+	var next *batchQueueItem
+	h.mu.Lock()
+	if advanceQueue {
+		h.archiveBatchLocked(h.currentBatchID, h.tasks)
+	}
+	h.running = false
+	h.cancelFunc = nil
+	h.ossUploader = nil
+
+	if advanceQueue {
+		queued, ok := h.promoteNextBatchLocked()
+		if ok {
+			next = &queued
+		}
+	}
+	h.mu.Unlock()
+
+	if next != nil {
+		utils.Info("🚀 [批量下载] 自动启动队列中的下一批: %s", next.ID)
+		go h.startBatchDownload(next.ForceRedownload)
+	}
+}
+
 // HandleBatchStart 处理批量下载开始请求
 func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 	path := Conn.Request.URL.Path
@@ -543,21 +645,6 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
-	h.mu.RLock()
-	busy := h.running || h.cancelFunc != nil
-	oldTasks := append([]BatchTask(nil), h.tasks...)
-	h.mu.RUnlock()
-
-	if busy {
-		err := fmt.Errorf("已有批量下载任务正在进行或收尾中，请稍后再试")
-		h.markExportFailed(req.ExportRecordID, err)
-		h.sendErrorResponse(Conn, err)
-		return true
-	}
-	for _, oldTask := range oldTasks {
-		h.cleanupTaskArtifacts(oldTask.GopeedTaskID, oldTask.TempPath, true)
-	}
-
 	var ossUploader batchOSSUploader
 	if req.OSSUploadEnabled {
 		ossUploader, err = h.loadBatchOSSUploader()
@@ -569,10 +656,8 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
-	// 初始化任务
-	h.mu.Lock()
-	h.tasks = make([]BatchTask, len(req.Videos))
-	h.ossUploader = ossUploader
+	// 初始化任务。任务先在局部构建，避免新批次覆盖正在运行的批次。
+	tasks := make([]BatchTask, len(req.Videos))
 	defaultHeaders := map[string]string{}
 	if origin := strings.TrimSpace(Conn.Request.Header.Get("Origin")); origin != "" {
 		defaultHeaders["Origin"] = origin
@@ -592,7 +677,7 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 				taskHeaders[k] = val
 			}
 		}
-		h.tasks[i] = BatchTask{
+		tasks[i] = BatchTask{
 			ID:              v.ID,
 			URL:             v.GetURL(),
 			Title:           v.Title,
@@ -611,6 +696,7 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 			Duration:         v.Duration,
 			SizeMB:           v.SizeMB,
 			Cover:            v.Cover,
+			CoverURL:         v.CoverURL,
 			Resolution:       v.Resolution,
 			PageSource:       pageSource, // 保存页面来源
 			PlayCount:        v.PlayCount,
@@ -627,11 +713,26 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 			OSSUploadEnabled: req.OSSUploadEnabled,
 		}
 		if req.OSSUploadEnabled {
-			h.tasks[i].OSSStatus = "pending"
+			tasks[i].OSSStatus = "pending"
 		}
 	}
-	h.running = true
-	h.mu.Unlock()
+
+	batchID := req.ExportRecordID
+	if batchID == "" {
+		batchID = fmt.Sprintf("batch-%d-%d", time.Now().UnixNano(), rand.Int63())
+	}
+	batch := batchQueueItem{
+		ID:              batchID,
+		Tasks:           tasks,
+		ForceRedownload: req.ForceRedownload,
+		OSSUploader:     ossUploader,
+	}
+
+	oldTasks, queuePosition := h.enqueueBatch(batch)
+
+	for _, oldTask := range oldTasks {
+		h.cleanupTaskArtifacts(oldTask.GopeedTaskID, oldTask.TempPath, true)
+	}
 
 	// 获取并发数配置
 	concurrency := 5 // 默认值（与配置默认值一致）
@@ -639,19 +740,28 @@ func (h *BatchHandler) HandleBatchStart(Conn *SunnyNet.HttpConn) bool {
 		concurrency = h.getConfig().DownloadConcurrency
 	}
 
-	utils.Info("🚀 [批量下载] 开始下载 %d 个视频，并发数: %d", len(req.Videos), concurrency)
+	if queuePosition > 0 {
+		utils.Info("📋 [批量下载] 批次 %s 已进入队列，前方批次数: %d", batchID, queuePosition)
+	} else {
+		utils.Info("🚀 [批量下载] 开始下载 %d 个视频，并发数: %d", len(req.Videos), concurrency)
+	}
 	if req.OSSUploadEnabled {
 		utils.Info("☁️ [批量下载] 已启用视频同步上传 OSS")
 	}
 
-	// 启动后台下载
-	go h.startBatchDownload(req.ForceRedownload)
+	// 当前无任务时立即启动；否则由队列在前一批完成后自动启动。
+	if queuePosition == 0 {
+		go h.startBatchDownload(req.ForceRedownload)
+	}
 
 	h.sendSuccessResponse(Conn, map[string]interface{}{
 		"total":            len(req.Videos),
 		"concurrency":      concurrency,
 		"ossUploadEnabled": req.OSSUploadEnabled,
 		"exportRecordId":   req.ExportRecordID,
+		"batchId":          batchID,
+		"queued":           queuePosition > 0,
+		"queuePosition":    queuePosition,
 	})
 	return true
 }
@@ -664,25 +774,30 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 	h.cancelFunc = cancel
 	h.mu.Unlock()
 
+	advanceQueue := false
 	defer func() {
-		h.mu.Lock()
-		h.running = false
-		h.cancelFunc = nil
-		h.ossUploader = nil
-		h.mu.Unlock()
-		cancel() // 确保释放资源
+		h.finishBatchDownload(cancel, advanceQueue)
 	}()
 
 	// 获取下载目录
 	downloadsDir, err := h.getDownloadsDir()
 	if err != nil {
 		utils.HandleError(err, "获取下载目录")
-		h.mu.RLock()
-		failedTasks := append([]BatchTask(nil), h.tasks...)
-		h.mu.RUnlock()
-		for _, task := range failedTasks {
-			h.markExportFailed(task.ExportRecordID, err)
+		h.mu.Lock()
+		for i := range h.tasks {
+			h.tasks[i].Status = "failed"
+			h.tasks[i].DownloadStatus = "failed"
+			h.tasks[i].Error = err.Error()
 		}
+		failedTasks := append([]BatchTask(nil), h.tasks...)
+		h.mu.Unlock()
+		for _, task := range failedTasks {
+			h.persistExportTask(task)
+		}
+		for exportRecordID := range collectBatchExportRecordIDs(failedTasks) {
+			h.markExportFailed(exportRecordID, err)
+		}
+		advanceQueue = true
 		return
 	}
 
@@ -789,6 +904,7 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 
 	if pendingCount == 0 {
 		utils.Info("ℹ️ [批量下载] 没有待处理的任务（所有任务已完成或失败）")
+		advanceQueue = true
 		return
 	}
 	utils.Info("📋 [批量下载] 开始处理 %d 个待处理任务", pendingCount)
@@ -819,6 +935,7 @@ func (h *BatchHandler) startBatchDownload(forceRedownload bool) {
 			}
 		}
 	}
+	advanceQueue = !batchTasksHavePending(finalTasks)
 }
 
 func collectBatchExportRecordIDs(tasks []BatchTask) map[string]struct{} {
@@ -1538,14 +1655,60 @@ func (h *BatchHandler) HandleBatchProgress(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
+	requestedBatchID := strings.TrimSpace(Conn.Request.URL.Query().Get("batchId"))
+	if Conn.Request.Body != nil {
+		body, readErr := io.ReadAll(io.LimitReader(Conn.Request.Body, 64*1024))
+		Conn.Request.Body.Close()
+		if readErr == nil && len(body) > 0 {
+			var req struct {
+				BatchID        string `json:"batchId"`
+				ExportRecordID string `json:"exportRecordId"`
+			}
+			if json.Unmarshal(body, &req) == nil {
+				requestedBatchID = firstNonEmpty(strings.TrimSpace(req.BatchID), strings.TrimSpace(req.ExportRecordID), requestedBatchID)
+			}
+		}
+	}
+
 	h.mu.RLock()
-	total := len(h.tasks)
+	activeBatchID := h.currentBatchID
+	resolvedBatchID := activeBatchID
+	tasks := append([]BatchTask(nil), h.tasks...)
+	isRunning := h.running
+	queued := false
+	queuePosition := 0
+	found := requestedBatchID == "" || requestedBatchID == activeBatchID
+	queueLength := len(h.pendingBatches)
+
+	if requestedBatchID != "" && requestedBatchID != activeBatchID {
+		found = false
+		tasks = nil
+		isRunning = false
+		resolvedBatchID = requestedBatchID
+		for i, pending := range h.pendingBatches {
+			if pending.ID == requestedBatchID {
+				tasks = append([]BatchTask(nil), pending.Tasks...)
+				queued = true
+				queuePosition = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			if completed, ok := h.completedBatches[requestedBatchID]; ok {
+				tasks = append([]BatchTask(nil), completed...)
+				found = true
+			}
+		}
+	}
+	h.mu.RUnlock()
+
+	total := len(tasks)
 	done, failed, running := 0, 0, 0
 	var downloadingTasks []map[string]interface{}
 	var allTasks []map[string]interface{}
-	isRunning := h.running // 检查是否正在运行
 
-	for _, t := range h.tasks {
+	for _, t := range tasks {
 		taskInfo := map[string]interface{}{
 			"id":               t.ID,
 			"title":            t.Title,
@@ -1581,14 +1744,18 @@ func (h *BatchHandler) HandleBatchProgress(Conn *SunnyNet.HttpConn) bool {
 			}
 		}
 	}
-	h.mu.RUnlock()
-
 	response := map[string]interface{}{
-		"total":   total,
-		"done":    done,
-		"failed":  failed,
-		"running": running,
-		"tasks":   allTasks,
+		"total":         total,
+		"done":          done,
+		"failed":        failed,
+		"running":       running,
+		"tasks":         allTasks,
+		"batchId":       resolvedBatchID,
+		"activeBatchId": activeBatchID,
+		"queued":        queued,
+		"queuePosition": queuePosition,
+		"queueLength":   queueLength,
+		"found":         found,
 	}
 
 	// 返回所有正在下载的任务（并发模式下可能有多个）
@@ -1623,7 +1790,53 @@ func (h *BatchHandler) HandleBatchCancel(Conn *SunnyNet.HttpConn) bool {
 		}
 	}
 
+	requestedBatchID := strings.TrimSpace(Conn.Request.URL.Query().Get("batchId"))
+	if Conn.Request.Body != nil {
+		body, _ := io.ReadAll(io.LimitReader(Conn.Request.Body, 64*1024))
+		Conn.Request.Body.Close()
+		if len(body) > 0 {
+			var req struct {
+				BatchID string `json:"batchId"`
+			}
+			if json.Unmarshal(body, &req) == nil && strings.TrimSpace(req.BatchID) != "" {
+				requestedBatchID = strings.TrimSpace(req.BatchID)
+			}
+		}
+	}
+
 	h.mu.Lock()
+	if requestedBatchID != "" && requestedBatchID != h.currentBatchID {
+		var cancelledTasks []BatchTask
+		for i, pending := range h.pendingBatches {
+			if pending.ID == requestedBatchID {
+				cancelledTasks = append([]BatchTask(nil), pending.Tasks...)
+				h.pendingBatches = append(h.pendingBatches[:i], h.pendingBatches[i+1:]...)
+				break
+			}
+		}
+		h.mu.Unlock()
+
+		if len(cancelledTasks) > 0 {
+			cancelErr := fmt.Errorf("排队中的批量下载及 OSS 上传任务已取消")
+			for exportRecordID := range collectBatchExportRecordIDs(cancelledTasks) {
+				h.markExportFailed(exportRecordID, cancelErr)
+			}
+			h.sendSuccessResponse(Conn, map[string]interface{}{
+				"message": "排队任务已取消",
+				"batchId": requestedBatchID,
+				"queued":  true,
+			})
+			return true
+		}
+
+		// 目标批次可能已完成；不应因此误取消其他页面的当前批次。
+		h.sendSuccessResponse(Conn, map[string]interface{}{
+			"message": "目标批次已不在运行或排队中",
+			"batchId": requestedBatchID,
+		})
+		return true
+	}
+
 	cancel := h.cancelFunc
 	resumeEnabled := h.batchResumeEnabled()
 	taskIDs := make([]string, 0)
@@ -1850,6 +2063,8 @@ func (h *BatchHandler) HandleBatchClear(Conn *SunnyNet.HttpConn) bool {
 	h.mu.Lock()
 	cancel := h.cancelFunc
 	busy := h.running || h.cancelFunc != nil
+	queuedBatches := append([]batchQueueItem(nil), h.pendingBatches...)
+	h.pendingBatches = nil
 	if h.running && cancel != nil {
 		h.running = false
 	}
@@ -1871,9 +2086,15 @@ func (h *BatchHandler) HandleBatchClear(Conn *SunnyNet.HttpConn) bool {
 
 	h.mu.Lock()
 	oldTasks := append([]BatchTask(nil), h.tasks...)
-	taskCount := len(h.tasks)
+	for _, queuedBatch := range queuedBatches {
+		oldTasks = append(oldTasks, queuedBatch.Tasks...)
+	}
+	taskCount := len(oldTasks)
 	h.tasks = nil
+	h.currentBatchID = ""
 	h.ossUploader = nil
+	h.completedBatches = make(map[string][]BatchTask)
+	h.completedOrder = nil
 	h.mu.Unlock()
 
 	utils.Info("🗑️ [批量下载] 已清除所有任务（%d 个）", taskCount)

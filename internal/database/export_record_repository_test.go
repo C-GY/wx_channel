@@ -31,6 +31,9 @@ func TestExportRecordRepositoryReadinessAndQueue(t *testing.T) {
 	if originalRecord.Status != ExportStatusReady || !originalRecord.DownloadReady || originalRecord.CompletedCount != 2 {
 		t.Fatalf("original export should be immediately ready: %#v", originalRecord)
 	}
+	if originalRecord.CreativeRadarSyncStatus != CreativeRadarSyncNotSynced {
+		t.Fatalf("new export should be unsynchronized: %#v", originalRecord)
+	}
 
 	ossRecord := &ExportRecord{ID: "oss-export", FileName: "oss.csv", OSSUploadEnabled: true}
 	if err := repo.Create(ossRecord, exportRecordTestItems()); err != nil {
@@ -48,7 +51,7 @@ func TestExportRecordRepositoryReadinessAndQueue(t *testing.T) {
 		OSSProgress:      100,
 		OSSUploadedBytes: 1024,
 		OSSTotalBytes:    1024,
-		OSSObjectKey:     "local/materials/video-1.mp4",
+		OSSObjectKey:     "wechat_channel/video-1.mp4",
 		OSSVideoURL:      "https://bucket.oss/video-1.mp4",
 	}); err != nil {
 		t.Fatalf("complete first OSS item: %v", err)
@@ -69,7 +72,7 @@ func TestExportRecordRepositoryReadinessAndQueue(t *testing.T) {
 		OSSProgress:      100,
 		OSSUploadedBytes: 2048,
 		OSSTotalBytes:    2048,
-		OSSObjectKey:     "local/materials/video-2.mp4",
+		OSSObjectKey:     "wechat_channel/video-2.mp4",
 		OSSVideoURL:      "https://bucket.oss/video-2.mp4",
 	}); err != nil {
 		t.Fatalf("complete second OSS item: %v", err)
@@ -101,6 +104,74 @@ func TestExportRecordRepositoryReadinessAndQueue(t *testing.T) {
 	}
 	if stats.Total != 2 || stats.Ready != 2 || stats.Processing != 0 || stats.Failed != 0 {
 		t.Fatalf("unexpected export stats: %#v", stats)
+	}
+}
+
+func TestExportRecordRepositoryCreativeRadarSyncLifecycle(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewExportRecordRepository()
+	record := &ExportRecord{ID: "radar-export", FileName: "radar.csv"}
+	if err := repo.Create(record, exportRecordTestItems()); err != nil {
+		t.Fatalf("create export: %v", err)
+	}
+	candidates, err := repo.ListCreativeRadarSyncCandidates()
+	if err != nil || len(candidates) != 1 || candidates[0].ID != record.ID {
+		t.Fatalf("unexpected creative radar candidates: %#v, error: %v", candidates, err)
+	}
+	if err := repo.PrepareCreativeRadarSync(candidates); err != nil {
+		t.Fatalf("prepare creative radar sync: %v", err)
+	}
+	stored, _ := repo.GetByID(record.ID)
+	if stored.CreativeRadarSyncStatus != CreativeRadarSyncPending || stored.CreativeRadarSyncTotal != 2 {
+		t.Fatalf("unexpected queued sync state: %#v", stored)
+	}
+	if err := repo.BeginCreativeRadarSync(record.ID, 2); err != nil {
+		t.Fatalf("begin creative radar sync: %v", err)
+	}
+	if err := repo.UpdateCreativeRadarSyncProgress(record.ID, 1, 0, 1, 0, ""); err != nil {
+		t.Fatalf("update creative radar progress: %v", err)
+	}
+	if err := repo.FinishCreativeRadarSync(record.ID, true, 2, 0, 1, 1, ""); err != nil {
+		t.Fatalf("finish creative radar sync: %v", err)
+	}
+	stored, err = repo.GetByID(record.ID)
+	if err != nil {
+		t.Fatalf("read synchronized export: %v", err)
+	}
+	if stored.CreativeRadarSyncStatus != CreativeRadarSyncSuccess ||
+		stored.CreativeRadarSyncCompleted != 2 || stored.CreativeRadarInserted != 1 ||
+		stored.CreativeRadarUpdated != 1 || stored.CreativeRadarSyncedAt == nil {
+		t.Fatalf("unexpected successful sync state: %#v", stored)
+	}
+	candidates, err = repo.ListCreativeRadarSyncCandidates()
+	if err != nil || len(candidates) != 0 {
+		t.Fatalf("successful export should not be selected again: %#v, error: %v", candidates, err)
+	}
+}
+
+func TestExportRecordRepositoryRecoversInterruptedCreativeRadarSync(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	repo := NewExportRecordRepository()
+	record := &ExportRecord{ID: "interrupted-radar-export", FileName: "interrupted.csv"}
+	if err := repo.Create(record, exportRecordTestItems()); err != nil {
+		t.Fatalf("create export: %v", err)
+	}
+	if err := repo.BeginCreativeRadarSync(record.ID, 2); err != nil {
+		t.Fatalf("begin creative radar sync: %v", err)
+	}
+	if err := repo.RecoverInterruptedCreativeRadarSync(); err != nil {
+		t.Fatalf("recover interrupted creative radar sync: %v", err)
+	}
+	stored, err := repo.GetByID(record.ID)
+	if err != nil {
+		t.Fatalf("read recovered export: %v", err)
+	}
+	if stored.CreativeRadarSyncStatus != CreativeRadarSyncFailed || stored.CreativeRadarSyncError == "" {
+		t.Fatalf("unexpected recovered sync state: %#v", stored)
 	}
 }
 

@@ -20,7 +20,7 @@ const (
 	DefaultOSSEndpoint         = "https://oss.fandow.com/"
 	DefaultOSSRegion           = "oss-cn-hangzhou"
 	DefaultOSSBucket           = "marketing-video-dashboard"
-	DefaultOSSObjectPrefix     = "local/materials"
+	DefaultOSSObjectPrefix     = "wechat_channel"
 	DefaultOSSSignedURLExpires = 7 * 24 * time.Hour
 	DefaultOSSAccessURLTimeout = 15 * time.Second
 	maxOSSSinglePutSize        = int64(5 * 1024 * 1024 * 1024)

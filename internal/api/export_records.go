@@ -21,14 +21,18 @@ const maxExportRecordItems = 100000
 
 // ExportRecordAPI 提供批量 CSV 导出记录、延迟下载和 OSS 上传队列接口。
 type ExportRecordAPI struct {
-	repository *database.ExportRecordRepository
-	now        func() time.Time
+	repository    *database.ExportRecordRepository
+	now           func() time.Time
+	creativeRadar *creativeRadarSyncController
 }
 
 func NewExportRecordAPI() *ExportRecordAPI {
+	repository := database.NewExportRecordRepository()
+	_ = repository.RecoverInterruptedCreativeRadarSync()
 	return &ExportRecordAPI{
-		repository: database.NewExportRecordRepository(),
-		now:        time.Now,
+		repository:    repository,
+		now:           time.Now,
+		creativeRadar: newCreativeRadarSyncController(),
 	}
 }
 
@@ -44,6 +48,14 @@ func (h *ExportRecordAPI) HandleExportRecords(w http.ResponseWriter, r *http.Req
 		default:
 			response.ErrorWithStatus(w, http.StatusMethodNotAllowed, http.StatusMethodNotAllowed, "Method not allowed")
 		}
+		return
+	}
+	if path == "creative-radar-sync" {
+		if r.Method != http.MethodPost {
+			response.ErrorWithStatus(w, http.StatusMethodNotAllowed, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		h.startCreativeRadarSync(w)
 		return
 	}
 
@@ -67,6 +79,14 @@ func (h *ExportRecordAPI) HandleExportRecords(w http.ResponseWriter, r *http.Req
 			return
 		}
 		h.markExportFailed(w, r, exportRecordID)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "creative-radar-sync" {
+		if r.Method != http.MethodPost {
+			response.ErrorWithStatus(w, http.StatusMethodNotAllowed, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		h.startSingleCreativeRadarSync(w, exportRecordID)
 		return
 	}
 	if len(parts) != 1 || r.Method != http.MethodGet {
@@ -254,12 +274,13 @@ func (h *ExportRecordAPI) listExportRecords(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	response.Success(w, map[string]interface{}{
-		"items":      result.Items,
-		"total":      result.Total,
-		"page":       result.Page,
-		"pageSize":   result.PageSize,
-		"totalPages": result.TotalPages,
-		"stats":      stats,
+		"items":                result.Items,
+		"total":                result.Total,
+		"page":                 result.Page,
+		"pageSize":             result.PageSize,
+		"totalPages":           result.TotalPages,
+		"stats":                stats,
+		"creativeRadarSyncJob": h.creativeRadar.snapshot(),
 	})
 }
 

@@ -17,16 +17,16 @@ func TestBuildOSSObjectKey(t *testing.T) {
 	t.Parallel()
 
 	date := time.Date(2026, time.July, 17, 10, 30, 0, 0, time.Local)
-	key, err := BuildOSSObjectKey("video_1-2", "local/materials", date)
+	key, err := BuildOSSObjectKey("video_1-2", DefaultOSSObjectPrefix, date)
 	if err != nil {
 		t.Fatalf("BuildOSSObjectKey() error = %v", err)
 	}
-	if want := "local/materials/2026-07-17/video_1-2.mp4"; key != want {
+	if want := "wechat_channel/2026-07-17/video_1-2.mp4"; key != want {
 		t.Fatalf("BuildOSSObjectKey() = %q, want %q", key, want)
 	}
 
 	for _, materialID := range []string{"", "../video", "video/name", "视频"} {
-		if _, err := BuildOSSObjectKey(materialID, "local/materials", date); err == nil {
+		if _, err := BuildOSSObjectKey(materialID, DefaultOSSObjectPrefix, date); err == nil {
 			t.Errorf("BuildOSSObjectKey(%q) unexpectedly succeeded", materialID)
 		}
 	}
@@ -85,17 +85,17 @@ func TestOSSSigV4MatchesBotocore(t *testing.T) {
 	}
 
 	presignedURL, err := service.presignGet(
-		"local/materials/2026-07-17/video-1.mp4",
+		"wechat_channel/2026-07-17/video-1.mp4",
 		time.Date(2026, time.July, 17, 5, 20, 33, 0, time.UTC),
 	)
 	if err != nil {
 		t.Fatalf("presignGet() error = %v", err)
 	}
-	wantURL := "https://example.com/marketing-video-dashboard/local/materials/2026-07-17/video-1.mp4?" +
+	wantURL := "https://example.com/marketing-video-dashboard/wechat_channel/2026-07-17/video-1.mp4?" +
 		"X-Amz-Algorithm=AWS4-HMAC-SHA256&" +
 		"X-Amz-Credential=test-id%2F20260717%2Foss-cn-hangzhou%2Fs3%2Faws4_request&" +
 		"X-Amz-Date=20260717T052033Z&X-Amz-Expires=604800&" +
-		"X-Amz-Signature=03be2f0f1cc40993971508a5120c26f645577c5eccedec0b991839446c2e38d1&" +
+		"X-Amz-Signature=3afdb2d5f45bdffac2b73b532f33ca2b522b12f67c7a71f29885c4964cefd56d&" +
 		"X-Amz-SignedHeaders=host"
 	if presignedURL != wantURL {
 		t.Fatalf("presignGet() = %q, want %q", presignedURL, wantURL)
@@ -106,7 +106,7 @@ func TestOSSServiceUploadVideo(t *testing.T) {
 	t.Parallel()
 
 	video := []byte("decrypted-mp4-video")
-	wantPath := "/marketing-video-dashboard/local/materials/2026-07-17/video-1.mp4"
+	wantPath := "/marketing-video-dashboard/wechat_channel/2026-07-17/video-1.mp4"
 	var mu sync.Mutex
 	methods := make([]string, 0, 3)
 

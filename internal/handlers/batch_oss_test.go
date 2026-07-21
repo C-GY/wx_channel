@@ -26,7 +26,7 @@ func (s *batchOSSUploaderStub) UploadVideo(
 	s.materialID = materialID
 	s.scrapedDate = scrapedDate
 	return services.OSSUploadResult{
-		ObjectKey:      "local/materials/2026-07-17/video-1.mp4",
+		ObjectKey:      "wechat_channel/2026-07-17/video-1.mp4",
 		URL:            "https://signed.example/video-1",
 		SizeBytes:      1024,
 		ETag:           "etag",
@@ -77,7 +77,7 @@ func TestUploadBatchTaskToOSS(t *testing.T) {
 	if task.OSSStatus != "done" || task.OSSError != "" {
 		t.Fatalf("task OSS status = %q, error = %q", task.OSSStatus, task.OSSError)
 	}
-	if task.OSSObjectKey != "local/materials/2026-07-17/video-1.mp4" {
+	if task.OSSObjectKey != "wechat_channel/2026-07-17/video-1.mp4" {
 		t.Fatalf("task OSS object key = %q", task.OSSObjectKey)
 	}
 	if task.OSSURL != "https://signed.example/video-1" {

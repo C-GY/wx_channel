@@ -15,6 +15,11 @@ function createSandbox() {
         'exportStatProcessing',
         'exportStatReady',
         'exportStatFailed',
+        'creativeRadarSyncPanel',
+        'creativeRadarSyncTitle',
+        'creativeRadarSyncDetail',
+        'creativeRadarSyncProgressFill',
+        'creativeRadarSyncButton',
         'ossUploadQueueTableBody',
         'ossQueueStatTotal',
         'ossQueueStatPending',
@@ -22,7 +27,13 @@ function createSandbox() {
         'ossQueueStatDone',
         'ossQueueStatFailed',
     ]) {
-        elements[id] = { innerHTML: '', textContent: '' };
+        elements[id] = {
+            innerHTML: '',
+            textContent: '',
+            style: {},
+            disabled: false,
+            classList: { toggle() {} },
+        };
     }
 
     const sandbox = {
@@ -84,12 +95,36 @@ function main() {
             completedCount: 2,
             failedCount: 0,
             downloadReady: true,
+            creativeRadarSyncStatus: 'success',
+            creativeRadarSyncTotal: 2,
+            creativeRadarSyncCompleted: 2,
+            creativeRadarInserted: 1,
+            creativeRadarUpdated: 1,
             createdAt: '2026-07-17T07:23:25Z'
         }];
     `, sandbox);
     sandbox.renderExportRecords();
     assert(!elements.exportRecordTableBody.innerHTML.includes('disabled'), 'ready OSS export download button should be enabled');
     assert(elements.exportRecordTableBody.innerHTML.includes("downloadExportRecordCSV('record-ready')"), 'ready export should download by record ID');
+    assert(elements.exportRecordTableBody.innerHTML.includes('同步成功'), 'ready export should render Creative Radar sync success');
+    assert(elements.exportRecordTableBody.innerHTML.includes('新增 1 / 更新 1'), 'sync result should show inserted and updated counts');
+
+    vm.runInContext(`
+        exportRecordState.creativeRadarSyncJob = {
+            id: 'job-1',
+            status: 'running',
+            totalRecords: 3,
+            completedRecords: 1,
+            successRecords: 1,
+            failedRecords: 0,
+            currentFileName: 'second.csv'
+        };
+    `, sandbox);
+    sandbox.renderCreativeRadarSyncJob();
+    assert(elements.creativeRadarSyncPanel.style.display === 'block', 'running sync should show the progress panel');
+    assert(elements.creativeRadarSyncTitle.textContent.includes('1/3'), 'running sync should show CSV-level progress');
+    assert(elements.creativeRadarSyncDetail.textContent.includes('second.csv'), 'running sync should show the current CSV');
+    assert(elements.creativeRadarSyncButton.disabled, 'sync button should be disabled while a job is running');
 
     sandbox.renderOSSUploadQueue([{
         exportRecordId: 'record-processing',

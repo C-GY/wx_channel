@@ -53,18 +53,26 @@ type DownloadRecord struct {
 // ExportRecord 表示一次从视频号批量列表发起的 CSV 导出。
 // 未启用 OSS 的记录创建后立即可下载；启用 OSS 的记录只有在全部视频上传完成后才可下载。
 type ExportRecord struct {
-	ID               string     `json:"id"`
-	FileName         string     `json:"fileName"`
-	Status           string     `json:"status"` // processing, ready, failed
-	OSSUploadEnabled bool       `json:"ossUploadEnabled"`
-	TotalCount       int        `json:"totalCount"`
-	CompletedCount   int        `json:"completedCount"`
-	FailedCount      int        `json:"failedCount"`
-	ErrorMessage     string     `json:"errorMessage,omitempty"`
-	DownloadReady    bool       `json:"downloadReady"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
-	ReadyAt          *time.Time `json:"readyAt,omitempty"`
+	ID                         string     `json:"id"`
+	FileName                   string     `json:"fileName"`
+	Status                     string     `json:"status"` // processing, ready, failed
+	OSSUploadEnabled           bool       `json:"ossUploadEnabled"`
+	TotalCount                 int        `json:"totalCount"`
+	CompletedCount             int        `json:"completedCount"`
+	FailedCount                int        `json:"failedCount"`
+	ErrorMessage               string     `json:"errorMessage,omitempty"`
+	DownloadReady              bool       `json:"downloadReady"`
+	CreativeRadarSyncStatus    string     `json:"creativeRadarSyncStatus"` // not_synced, pending, syncing, success, failed
+	CreativeRadarSyncTotal     int        `json:"creativeRadarSyncTotal"`
+	CreativeRadarSyncCompleted int        `json:"creativeRadarSyncCompleted"`
+	CreativeRadarSyncFailed    int        `json:"creativeRadarSyncFailed"`
+	CreativeRadarInserted      int        `json:"creativeRadarInserted"`
+	CreativeRadarUpdated       int        `json:"creativeRadarUpdated"`
+	CreativeRadarSyncError     string     `json:"creativeRadarSyncError,omitempty"`
+	CreativeRadarSyncedAt      *time.Time `json:"creativeRadarSyncedAt,omitempty"`
+	CreatedAt                  time.Time  `json:"createdAt"`
+	UpdatedAt                  time.Time  `json:"updatedAt"`
+	ReadyAt                    *time.Time `json:"readyAt,omitempty"`
 }
 
 // ExportRecordStats 是控制台导出记录页展示的全量状态统计。
@@ -118,6 +126,12 @@ const (
 	ExportStatusProcessing = "processing"
 	ExportStatusReady      = "ready"
 	ExportStatusFailed     = "failed"
+
+	CreativeRadarSyncNotSynced = "not_synced"
+	CreativeRadarSyncPending   = "pending"
+	CreativeRadarSyncing       = "syncing"
+	CreativeRadarSyncSuccess   = "success"
+	CreativeRadarSyncFailed    = "failed"
 )
 
 // DownloadStatus 常量

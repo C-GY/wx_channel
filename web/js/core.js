@@ -310,6 +310,7 @@ const ApiClient = {
     },
     async getExportRecord(id) { return await this.request('GET', `/export-records/${encodeURIComponent(id)}`); },
     async getOSSUploadQueue(limit = 100000) { return await this.request('GET', `/oss-upload-queue?limit=${encodeURIComponent(limit)}`); },
+    async syncCreativeRadar() { return await this.request('POST', '/export-records/creative-radar-sync', {}); },
     async downloadExportRecordCSV(id) {
         return await this.downloadFile(`/export-records/${encodeURIComponent(id)}/csv`);
     },

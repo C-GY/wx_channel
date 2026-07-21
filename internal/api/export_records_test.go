@@ -16,7 +16,7 @@ func TestBuildExportRecordCSVUsesRequestedOrderAndDynamicVideoLink(t *testing.T)
 		Author:           "作者",
 		PublishTime:      "2026-07-17 14:30:00",
 		OriginalVideoURL: "https://finder.video.qq.com/video-1.mp4?token=original",
-		OSSVideoURL:      "https://bucket.oss-cn-hangzhou.aliyuncs.com/local/materials/video-1.mp4",
+		OSSVideoURL:      "https://bucket.oss-cn-hangzhou.aliyuncs.com/wechat_channel/video-1.mp4",
 		CoverURL:         "https://finder.video.qq.com/cover.jpg",
 		DurationMs:       211000,
 		FileSize:         204063129,

@@ -35,6 +35,7 @@ func (r *ExportRecordRepository) Create(record *ExportRecord, items []ExportReco
 
 	now := time.Now()
 	record.TotalCount = len(items)
+	record.CreativeRadarSyncStatus = CreativeRadarSyncNotSynced
 	record.CreatedAt = now
 	record.UpdatedAt = now
 	if record.OSSUploadEnabled {
@@ -127,15 +128,23 @@ func nullableTime(value *time.Time) interface{} {
 func scanExportRecord(scanner interface{ Scan(...interface{}) error }) (*ExportRecord, error) {
 	record := &ExportRecord{}
 	var readyAt sql.NullTime
+	var creativeRadarSyncedAt sql.NullTime
 	if err := scanner.Scan(
 		&record.ID, &record.FileName, &record.Status, &record.OSSUploadEnabled,
 		&record.TotalCount, &record.CompletedCount, &record.FailedCount,
-		&record.ErrorMessage, &record.CreatedAt, &record.UpdatedAt, &readyAt,
+		&record.ErrorMessage, &record.CreativeRadarSyncStatus,
+		&record.CreativeRadarSyncTotal, &record.CreativeRadarSyncCompleted,
+		&record.CreativeRadarSyncFailed, &record.CreativeRadarInserted,
+		&record.CreativeRadarUpdated, &record.CreativeRadarSyncError,
+		&record.CreatedAt, &record.UpdatedAt, &readyAt, &creativeRadarSyncedAt,
 	); err != nil {
 		return nil, err
 	}
 	if readyAt.Valid {
 		record.ReadyAt = &readyAt.Time
+	}
+	if creativeRadarSyncedAt.Valid {
+		record.CreativeRadarSyncedAt = &creativeRadarSyncedAt.Time
 	}
 	record.DownloadReady = record.Status == ExportStatusReady
 	return record, nil
@@ -143,7 +152,10 @@ func scanExportRecord(scanner interface{ Scan(...interface{}) error }) (*ExportR
 
 const exportRecordSelect = `
 	SELECT id, file_name, status, oss_upload_enabled, total_count, completed_count,
-		failed_count, COALESCE(error_message, ''), created_at, updated_at, ready_at
+		failed_count, COALESCE(error_message, ''), creative_radar_sync_status,
+		creative_radar_sync_total, creative_radar_sync_completed, creative_radar_sync_failed,
+		creative_radar_inserted, creative_radar_updated, COALESCE(creative_radar_sync_error, ''),
+		created_at, updated_at, ready_at, creative_radar_synced_at
 	FROM export_records`
 
 func (r *ExportRecordRepository) GetByID(id string) (*ExportRecord, error) {
@@ -193,6 +205,147 @@ func (r *ExportRecordRepository) List(page, pageSize int) (*PagedResult[ExportRe
 		items = append(items, *record)
 	}
 	return NewPagedResult(items, total, page, pageSize), rows.Err()
+}
+
+// ListCreativeRadarSyncCandidates returns ready CSV records that have not yet
+// synchronized successfully. Failed records are intentionally included so the
+// page-level sync action also acts as a retry.
+func (r *ExportRecordRepository) ListCreativeRadarSyncCandidates() ([]ExportRecord, error) {
+	if err := r.available(); err != nil {
+		return nil, err
+	}
+	rows, err := r.db.Query(exportRecordSelect+`
+		WHERE status = ? AND creative_radar_sync_status <> ?
+		ORDER BY created_at ASC`, ExportStatusReady, CreativeRadarSyncSuccess)
+	if err != nil {
+		return nil, fmt.Errorf("查询待同步创意雷达的导出记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	records := make([]ExportRecord, 0)
+	for rows.Next() {
+		record, scanErr := scanExportRecord(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("读取待同步创意雷达的导出记录失败: %w", scanErr)
+		}
+		records = append(records, *record)
+	}
+	return records, rows.Err()
+}
+
+// PrepareCreativeRadarSync marks every selected CSV as queued in one
+// transaction, so users can distinguish waiting records from unsynchronized
+// records while the batch is running.
+func (r *ExportRecordRepository) PrepareCreativeRadarSync(records []ExportRecord) error {
+	if err := r.available(); err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始准备创意雷达同步失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now()
+	for _, record := range records {
+		if _, err := tx.Exec(`
+			UPDATE export_records SET creative_radar_sync_status = ?,
+				creative_radar_sync_total = total_count, creative_radar_sync_completed = 0,
+				creative_radar_sync_failed = 0, creative_radar_inserted = 0,
+				creative_radar_updated = 0, creative_radar_sync_error = '',
+				creative_radar_synced_at = NULL, updated_at = ?
+			WHERE id = ? AND status = ?`,
+			CreativeRadarSyncPending, now, record.ID, ExportStatusReady); err != nil {
+			return fmt.Errorf("准备导出记录 %s 的创意雷达同步失败: %w", record.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交创意雷达同步准备状态失败: %w", err)
+	}
+	return nil
+}
+
+func (r *ExportRecordRepository) BeginCreativeRadarSync(exportRecordID string, total int) error {
+	if err := r.available(); err != nil {
+		return err
+	}
+	result, err := r.db.Exec(`
+		UPDATE export_records SET creative_radar_sync_status = ?,
+			creative_radar_sync_total = ?, creative_radar_sync_completed = 0,
+			creative_radar_sync_failed = 0, creative_radar_inserted = 0,
+			creative_radar_updated = 0, creative_radar_sync_error = '',
+			creative_radar_synced_at = NULL, updated_at = ?
+		WHERE id = ? AND status = ?`,
+		CreativeRadarSyncing, total, time.Now(), exportRecordID, ExportStatusReady)
+	if err != nil {
+		return fmt.Errorf("标记创意雷达同步开始失败: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("可下载的导出记录不存在: %s", exportRecordID)
+	}
+	return nil
+}
+
+func (r *ExportRecordRepository) UpdateCreativeRadarSyncProgress(exportRecordID string, completed, failed, inserted, updated int, message string) error {
+	if err := r.available(); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(`
+		UPDATE export_records SET creative_radar_sync_completed = ?,
+			creative_radar_sync_failed = ?, creative_radar_inserted = ?,
+			creative_radar_updated = ?, creative_radar_sync_error = ?, updated_at = ?
+		WHERE id = ?`, completed, failed, inserted, updated, message, time.Now(), exportRecordID)
+	if err != nil {
+		return fmt.Errorf("更新创意雷达同步进度失败: %w", err)
+	}
+	return nil
+}
+
+func (r *ExportRecordRepository) FinishCreativeRadarSync(exportRecordID string, successful bool, completed, failed, inserted, updated int, message string) error {
+	if err := r.available(); err != nil {
+		return err
+	}
+	status := CreativeRadarSyncFailed
+	var syncedAt interface{}
+	if successful {
+		status = CreativeRadarSyncSuccess
+		syncedAt = time.Now()
+	}
+	result, err := r.db.Exec(`
+		UPDATE export_records SET creative_radar_sync_status = ?,
+			creative_radar_sync_completed = ?, creative_radar_sync_failed = ?,
+			creative_radar_inserted = ?, creative_radar_updated = ?,
+			creative_radar_sync_error = ?, creative_radar_synced_at = ?, updated_at = ?
+		WHERE id = ?`, status, completed, failed, inserted, updated, message,
+		syncedAt, time.Now(), exportRecordID)
+	if err != nil {
+		return fmt.Errorf("写入创意雷达同步结果失败: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("导出记录不存在: %s", exportRecordID)
+	}
+	return nil
+}
+
+// RecoverInterruptedCreativeRadarSync makes an interrupted app run retryable
+// after restart instead of leaving records permanently in a syncing state.
+func (r *ExportRecordRepository) RecoverInterruptedCreativeRadarSync() error {
+	if err := r.available(); err != nil {
+		return err
+	}
+	_, err := r.db.Exec(`
+		UPDATE export_records SET creative_radar_sync_status = ?,
+			creative_radar_sync_error = ?, updated_at = ?
+		WHERE creative_radar_sync_status IN (?, ?)`, CreativeRadarSyncFailed,
+		"应用已重启，上一次同步被中断，请重新点击同步", time.Now(),
+		CreativeRadarSyncPending, CreativeRadarSyncing)
+	if err != nil {
+		return fmt.Errorf("恢复中断的创意雷达同步状态失败: %w", err)
+	}
+	return nil
 }
 
 func (r *ExportRecordRepository) Stats() (*ExportRecordStats, error) {

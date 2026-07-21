@@ -45,19 +45,22 @@ function createElementState(extra = {}) {
 
 function loadBatchDownloadModule() {
   const source = fs.readFileSync(path.resolve(__dirname, 'batch_download.js'), 'utf8');
+  const defaultSecret = 'mvd_9XvKp7Qw2Lm8Nz4Rt6Yb3Hs5Fc1Da0';
   const elements = {
     'batch-oss-upload-enabled': createElementState({ checked: true }),
     'batch-oss-config-panel': createElementState(),
     'batch-oss-access-key-id': createElementState({ value: 'marketing-video-dashboard' }),
-    'batch-oss-access-key-secret': createElementState(),
+    'batch-oss-access-key-secret': createElementState({ value: defaultSecret }),
     'batch-oss-config-status': createElementState(),
     'batch-oss-clear-config': createElementState(),
+    'batch-sync-creative-radar-btn': createElementState(),
   };
   const requests = [];
   const logs = [];
   const blobs = [];
   let anchorClicked = false;
   let exportSequence = 0;
+  const creativeRadarSyncStates = {};
 
   class SandboxURL extends URL {}
   SandboxURL.createObjectURL = function () { return 'blob:test'; };
@@ -128,6 +131,21 @@ function loadBatchDownloadModule() {
       if (method === 'GET' && /\/api\/export-records\/[^/]+\/csv$/.test(url)) {
         return blobResponse({ type: 'text/csv', marker: 'backend-csv' });
       }
+      if (method === 'GET' && /\/api\/export-records\/[^/]+$/.test(url)) {
+        const exportRecordId = decodeURIComponent(url.split('/').at(-1));
+        const synchronized = creativeRadarSyncStates[exportRecordId] === 'success';
+        return response({
+          record: {
+            id: exportRecordId,
+            status: 'ready',
+            creativeRadarSyncStatus: synchronized ? 'success' : 'not_synced',
+            creativeRadarSyncCompleted: synchronized ? 1 : 0,
+            creativeRadarInserted: synchronized ? 1 : 0,
+            creativeRadarUpdated: 0,
+          },
+          items: [],
+        });
+      }
       if (method === 'POST' && url.endsWith('/batch_progress')) {
         return response({
           total: 1,
@@ -137,7 +155,7 @@ function loadBatchDownloadModule() {
           tasks: [{
             id: 'video-1',
             ossStatus: 'done',
-            ossObjectKey: 'local/materials/2026-07-17/video-1.mp4',
+            ossObjectKey: 'wechat_channel/2026-07-17/video-1.mp4',
             ossUrl: 'https://signed.example/video-1?token=temporary',
             ossError: '',
           }],
@@ -160,10 +178,21 @@ function loadBatchDownloadModule() {
       }
       if (method === 'POST' && url.endsWith('/batch_start')) {
         const body = JSON.parse(options.body);
-        return response({ total: body.videos.length, concurrency: 5, exportRecordId: body.exportRecordId });
+        return response({
+          total: body.videos.length,
+          concurrency: 5,
+          exportRecordId: body.exportRecordId,
+          batchId: body.exportRecordId || 'batch-test',
+          queued: false,
+        });
       }
       if (method === 'POST' && /\/api\/export-records\/[^/]+\/fail$/.test(url)) {
         return response({ failed: true });
+      }
+      if (method === 'POST' && /\/api\/export-records\/[^/]+\/creative-radar-sync$/.test(url)) {
+        const exportRecordId = decodeURIComponent(url.split('/').at(-2));
+        creativeRadarSyncStates[exportRecordId] = 'success';
+        return response({ status: 'running', totalRecords: 1 });
       }
       if (method === 'DELETE') {
         return response({ cleared: true });
@@ -192,10 +221,12 @@ async function main() {
   const manager = sandbox.__wx_batch_download_manager__;
 
   assertEqual(manager.ossAccessKeyId, 'marketing-video-dashboard', 'AccessKey ID should have the requested default value');
+  assert(manager.ossUploadEnabled, 'OSS upload should be enabled by default');
+  assertEqual(elements['batch-oss-access-key-secret'].value, 'mvd_9XvKp7Qw2Lm8Nz4Rt6Yb3Hs5Fc1Da0', 'AccessKey Secret should have the requested default value');
 
   await sandbox.__load_batch_oss_config__();
   assertEqual(elements['batch-oss-access-key-id'].value, 'cached-id', 'GET should restore the cached AccessKey ID');
-  assertEqual(elements['batch-oss-access-key-secret'].value, '', 'GET must never restore the cached Secret into the page');
+  assertEqual(elements['batch-oss-access-key-secret'].value, 'mvd_9XvKp7Qw2Lm8Nz4Rt6Yb3Hs5Fc1Da0', 'GET should preserve a Secret the page already initialized');
   assert(manager.ossHasSavedSecret, 'GET should retain only the hasSecret marker');
   assert(elements['batch-oss-access-key-secret'].placeholder.includes('留空'), 'saved Secret should be represented by a placeholder');
 
@@ -204,7 +235,7 @@ async function main() {
   let post = requests.filter((request) => request.method === 'POST' && request.url.endsWith('/oss_config')).at(-1);
   let body = JSON.parse(post.options.body);
   assertEqual(body.accessKeyId, 'cached-id', 'POST should retain the cached AccessKey ID');
-  assertEqual(body.accessKeySecret, '', 'POST should let the backend reuse a cached Secret without exposing it');
+  assertEqual(body.accessKeySecret, 'mvd_9XvKp7Qw2Lm8Nz4Rt6Yb3Hs5Fc1Da0', 'POST should save the requested default Secret');
 
   elements['batch-oss-access-key-id'].value = 'changed-id';
   elements['batch-oss-access-key-secret'].value = '';
@@ -228,7 +259,7 @@ async function main() {
   await sandbox.__clear_batch_oss_config__();
   assert(requests.some((request) => request.method === 'DELETE'), 'clear should call the local DELETE endpoint');
   assertEqual(elements['batch-oss-access-key-id'].value, 'marketing-video-dashboard', 'clear should restore the default AccessKey ID');
-  assertEqual(elements['batch-oss-access-key-secret'].value, '', 'clear should erase AccessKey Secret from the page');
+  assertEqual(elements['batch-oss-access-key-secret'].value, 'mvd_9XvKp7Qw2Lm8Nz4Rt6Yb3Hs5Fc1Da0', 'clear should restore the default AccessKey Secret');
   assertEqual(manager.ossAccessKeyId, 'marketing-video-dashboard', 'clear should restore the manager default AccessKey ID');
   assertEqual(manager.ossSavedAccessKeyId, '', 'clear should still remove the cached AccessKey ID');
   assert(!manager.ossHasSavedSecret, 'clear should reset the saved Secret marker');
@@ -248,6 +279,7 @@ async function main() {
         fileSize: 1024,
       }],
     },
+    coverUrl: 'https://finder.video.qq.com/video-1-cover.jpg',
     likeCount: 10,
   }], 'test');
   await sandbox.__export_batch_video_csv__();
@@ -259,10 +291,16 @@ async function main() {
   const createOSSBody = JSON.parse(createOSSRequest.options.body);
   assert(createOSSBody.ossUploadEnabled, 'OSS export record should be marked as an OSS export');
   assertEqual(createOSSBody.videos.length, 1, 'OSS export record should contain the same downloadable videos as the batch task');
+  assertEqual(createOSSBody.videos[0].coverUrl, 'https://finder.video.qq.com/video-1-cover.jpg', 'OSS export record should preserve coverUrl for Creative Radar');
   const batchStart = requests.find(request => request.method === 'POST' && request.url.endsWith('/batch_start'));
   const batchBody = JSON.parse(batchStart.options.body);
   assertEqual(batchBody.exportRecordId, 'export-1', 'batch task should be linked to its export record');
   assert(batchBody.ossUploadEnabled, 'CSV action should enable OSS upload on the linked batch task');
+  const linkedProgressRequest = requests.find(request => {
+    if (request.method !== 'POST' || !request.url.endsWith('/batch_progress') || !request.options.body) return false;
+    return JSON.parse(request.options.body).batchId === 'export-1';
+  });
+  assert(linkedProgressRequest, 'progress polling should target the batch returned by batch_start');
   assertEqual(
     batchBody.videos[0].capturedAt,
     createOSSBody.videos[0].capturedAt,
@@ -284,6 +322,36 @@ async function main() {
   assert(requests.some(request => request.method === 'GET' && request.url.includes('/api/export-records/export-2/csv')), 'non-OSS export should request its ready CSV immediately');
   assert(fixture.anchorWasClicked(), 'non-OSS export should immediately trigger the browser download');
   assertEqual(blobs.length, 0, 'CSV is generated by the backend and must not expose credentials in a page-created Blob');
+
+  elements['batch-oss-upload-enabled'].checked = true;
+  await sandbox.__export_batch_video_csv__({
+    autoSyncCreativeRadar: true,
+    actionButton: elements['batch-sync-creative-radar-btn'],
+  });
+  const autoCreateRequests = requests.filter(request => request.method === 'POST' && request.url === '/api/export-records');
+  const autoExportId = `export-${autoCreateRequests.length}`;
+  assert(
+    requests.some(request => request.method === 'POST' && request.url === `/api/export-records/${autoExportId}/creative-radar-sync`),
+    'Creative Radar button should automatically synchronize its CSV after the record becomes ready',
+  );
+  assertEqual(elements['batch-sync-creative-radar-btn'].textContent, '同步创意雷达系统', 'Creative Radar button text should reset after completion');
+
+  const startsBeforeQueueTest = requests.filter(request => request.method === 'POST' && request.url.endsWith('/batch_start')).length;
+  await Promise.all([
+    sandbox.__batch_download_selected__({
+      videos: manager.videos.slice(),
+      ossState: { enabled: true },
+      exportRecordId: 'queue-export-1',
+    }),
+    sandbox.__batch_download_selected__({
+      videos: manager.videos.slice(),
+      ossState: { enabled: true },
+      exportRecordId: 'queue-export-2',
+    }),
+  ]);
+  const queueStarts = requests.filter(request => request.method === 'POST' && request.url.endsWith('/batch_start')).slice(startsBeforeQueueTest);
+  assertEqual(queueStarts.length, 2, 'a second batch click should be submitted even while the first click is still active');
+  assertEqual(manager.activeBatchRequestSequence, 0, 'only the newest batch should own and reset the shared progress UI');
 }
 
 main().catch((error) => {
