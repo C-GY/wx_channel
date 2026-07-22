@@ -32,6 +32,7 @@ function blobResponse(blob) {
 }
 
 function createElementState(extra = {}) {
+  const attributes = {};
   return Object.assign({
     value: '',
     checked: false,
@@ -39,6 +40,9 @@ function createElementState(extra = {}) {
     placeholder: '',
     textContent: '',
     style: {},
+    isConnected: true,
+    setAttribute(name, value) { attributes[name] = String(value); },
+    getAttribute(name) { return Object.prototype.hasOwnProperty.call(attributes, name) ? attributes[name] : null; },
     focus() { this.focused = true; },
   }, extra);
 }
@@ -341,6 +345,45 @@ async function main() {
     'automatic Creative Radar synchronization should be owned by the backend rather than a page polling request',
   );
   assertEqual(elements['batch-sync-creative-radar-btn'].textContent, '同步创意雷达系统', 'Creative Radar button text should reset after completion');
+
+  const singleVideoButton = createElementState({ textContent: '同步创意雷达系统' });
+  const createCountBeforeSingle = requests.filter(request => request.method === 'POST' && request.url === '/api/export-records').length;
+  const startCountBeforeSingle = requests.filter(request => request.method === 'POST' && request.url.endsWith('/batch_start')).length;
+  const singleQueued = await sandbox.__sync_single_video_to_creative_radar__({
+    id: 'single-video-1',
+    type: 'media',
+    title: 'single video',
+    nickname: 'single author',
+    url: 'https://finder.video.qq.com/single-video-1.mp4',
+    key: '',
+    coverUrl: 'https://finder.video.qq.com/single-video-1-cover.jpg',
+    duration: 15000,
+    size: 2048,
+    likeCount: 20,
+    commentCount: 3,
+    favCount: 4,
+    forwardCount: 5,
+  }, singleVideoButton);
+  assert(singleQueued, 'single-video Creative Radar action should be accepted');
+  const singleCreateRequests = requests.filter(request => request.method === 'POST' && request.url === '/api/export-records').slice(createCountBeforeSingle);
+  assertEqual(singleCreateRequests.length, 1, 'single-video action should create exactly one export record');
+  const singleCreateBody = JSON.parse(singleCreateRequests[0].options.body);
+  assert(singleCreateBody.ossUploadEnabled, 'single-video action should always enable OSS upload');
+  assert(singleCreateBody.autoSyncCreativeRadar, 'single-video action should persist backend-owned Creative Radar auto-sync');
+  assertEqual(singleCreateBody.videos.length, 1, 'single-video action should contain exactly one video');
+  assertEqual(singleCreateBody.videos[0].videoId, 'single-video-1', 'single-video action should preserve the video ID');
+  assertEqual(singleCreateBody.videos[0].coverUrl, 'https://finder.video.qq.com/single-video-1-cover.jpg', 'single-video action should preserve coverUrl');
+  const singleStarts = requests.filter(request => request.method === 'POST' && request.url.endsWith('/batch_start')).slice(startCountBeforeSingle);
+  assertEqual(singleStarts.length, 1, 'single-video action should submit one backend queue task');
+  const singleStartBody = JSON.parse(singleStarts[0].options.body);
+  assertEqual(singleStartBody.exportRecordId, `export-${createCountBeforeSingle + 1}`, 'single-video queue task should link to its export record');
+  assert(singleStartBody.ossUploadEnabled, 'single-video queue task should upload to OSS');
+  assertEqual(singleStartBody.videos.length, 1, 'single-video queue task should download exactly one video');
+  assert(singleVideoButton.disabled, 'the current video button should stay busy while its synchronization is running');
+  sandbox.__reset_single_creative_radar_button_for_video__(singleVideoButton, 'single-video-2');
+  assertEqual(singleVideoButton.textContent, '同步创意雷达系统', 'scrolling to another video should immediately reset the button label');
+  assert(!singleVideoButton.disabled, 'scrolling to another video should immediately make the button clickable');
+  assertEqual(singleVideoButton.getAttribute('data-current-video-id'), 'single-video-2', 'button state should follow the newly active video');
 
   const startsBeforeQueueTest = requests.filter(request => request.method === 'POST' && request.url.endsWith('/batch_start')).length;
   await Promise.all([

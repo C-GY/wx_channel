@@ -21,7 +21,6 @@ const (
 	DefaultOSSRegion           = "oss-cn-hangzhou"
 	DefaultOSSBucket           = "marketing-video-dashboard"
 	DefaultOSSObjectPrefix     = "wechat_channel"
-	DefaultOSSSignedURLExpires = 7 * 24 * time.Hour
 	DefaultOSSAccessURLTimeout = 15 * time.Second
 	maxOSSSinglePutSize        = int64(5 * 1024 * 1024 * 1024)
 )
@@ -37,7 +36,6 @@ type OSSSettings struct {
 	AccessKeyID      string
 	AccessKeySecret  string
 	ObjectPrefix     string
-	SignedURLExpires time.Duration
 	AccessURLTimeout time.Duration
 	VerifyAccessURL  bool
 }
@@ -51,7 +49,6 @@ func DefaultBatchOSSSettings(accessKeyID, accessKeySecret string) OSSSettings {
 		AccessKeyID:      strings.TrimSpace(accessKeyID),
 		AccessKeySecret:  strings.TrimSpace(accessKeySecret),
 		ObjectPrefix:     DefaultOSSObjectPrefix,
-		SignedURLExpires: DefaultOSSSignedURLExpires,
 		AccessURLTimeout: DefaultOSSAccessURLTimeout,
 		VerifyAccessURL:  true,
 	}
@@ -85,16 +82,13 @@ func (s OSSSettings) validate() error {
 	if _, err := normalizeOSSObjectPrefix(s.ObjectPrefix); err != nil {
 		return err
 	}
-	if s.SignedURLExpires <= 0 || s.SignedURLExpires > DefaultOSSSignedURLExpires {
-		return fmt.Errorf("OSS 预签名地址有效期必须在 1 秒到 7 天之间")
-	}
 	if s.AccessURLTimeout <= 0 || s.AccessURLTimeout > 2*time.Minute {
 		return fmt.Errorf("OSS 访问地址校验超时必须在 1 秒到 2 分钟之间")
 	}
 	return nil
 }
 
-// OSSUploadResult contains stable object identity and the current signed access URL.
+// OSSUploadResult contains stable object identity and its permanent public URL.
 type OSSUploadResult struct {
 	ObjectKey      string
 	URL            string
@@ -179,8 +173,8 @@ func BuildOSSObjectKey(materialID, prefix string, scrapedDate time.Time) (string
 	return normalizedPrefix + "/" + scrapedDate.Format("2006-01-02") + "/" + materialID + ".mp4", nil
 }
 
-// UploadVideo hashes and streams one local MP4 with a single signed PUT, then
-// verifies object size with HEAD and validates a one-byte signed GET.
+// UploadVideo hashes and streams one local MP4 with a signed PUT, then verifies
+// object size with HEAD and validates the permanent public URL with a range GET.
 func (s *OSSService) UploadVideo(ctx context.Context, filePath, materialID string, scrapedDate time.Time) (OSSUploadResult, error) {
 	return s.uploadVideo(ctx, filePath, materialID, scrapedDate, nil)
 }
@@ -272,10 +266,7 @@ func (s *OSSService) uploadVideo(
 		return result, fmt.Errorf("OSS 上传后大小校验失败：本地 %d bytes，远端 %d bytes", info.Size(), remoteSize)
 	}
 
-	accessURL, err := s.presignGet(objectKey, s.now().UTC())
-	if err != nil {
-		return result, err
-	}
+	accessURL := s.objectURL(objectKey).String()
 	accessVerified := false
 	if s.settings.VerifyAccessURL {
 		if err := s.verifyAccessURL(ctx, accessURL); err != nil {
@@ -431,30 +422,6 @@ func hmacSHA256(key []byte, value string) []byte {
 func sha256Hex(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
-}
-
-func (s *OSSService) presignGet(objectKey string, now time.Time) (string, error) {
-	target := s.objectURL(objectKey)
-	amzDate := now.Format("20060102T150405Z")
-	shortDate := now.Format("20060102")
-	credentialScope := shortDate + "/" + s.settings.Region + "/s3/aws4_request"
-	expires := int64(s.settings.SignedURLExpires / time.Second)
-
-	query := target.Query()
-	query.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
-	query.Set("X-Amz-Credential", s.settings.AccessKeyID+"/"+credentialScope)
-	query.Set("X-Amz-Date", amzDate)
-	query.Set("X-Amz-Expires", strconv.FormatInt(expires, 10))
-	query.Set("X-Amz-SignedHeaders", "host")
-	target.RawQuery = canonicalOSSQuery(query)
-
-	canonicalHeaders := "host:" + target.Host + "\n"
-	canonicalRequest := http.MethodGet + "\n" + canonicalOSSURI(target) + "\n" + target.RawQuery + "\n" +
-		canonicalHeaders + "\n" + "host\nUNSIGNED-PAYLOAD"
-	stringToSign := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n" + sha256Hex([]byte(canonicalRequest))
-	query.Set("X-Amz-Signature", hex.EncodeToString(s.signatureKey(shortDate, stringToSign)))
-	target.RawQuery = canonicalOSSQuery(query)
-	return target.String(), nil
 }
 
 func (s *OSSService) verifyAccessURL(ctx context.Context, accessURL string) error {

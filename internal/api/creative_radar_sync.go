@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -338,6 +339,13 @@ func (h *ExportRecordAPI) syncCreativeRadarRecord(record database.ExportRecord) 
 	}
 
 	videos := buildCreativeRadarVideos(record, items)
+	for index, video := range videos {
+		if record.OSSUploadEnabled && strings.TrimSpace(video.VideoURL) == "" {
+			message := fmt.Sprintf("第 %d 条（%s）OSS 上传地址为空，已阻止向创意雷达写入空链接", index+1, creativeRadarErrorTitle(items, index))
+			_ = h.repository.FinishCreativeRadarSync(record.ID, false, 0, len(items), 0, 0, message)
+			return false
+		}
+	}
 	completed := 0
 	failed := 0
 	inserted := 0
@@ -368,8 +376,12 @@ func (h *ExportRecordAPI) syncCreativeRadarRecord(record database.ExportRecord) 
 				if row < offset+1 || row > end {
 					row = offset + 1
 				}
+				reason := strings.TrimSpace(itemError.Reason)
+				if reason == "" {
+					reason = "创意雷达接口返回失败，但未提供具体原因"
+				}
 				errorMessages = append(errorMessages,
-					fmt.Sprintf("第 %d 条（%s）: %s", row, creativeRadarErrorTitle(items, row-1), itemError.Reason))
+					fmt.Sprintf("第 %d 条（%s）: %s", row, creativeRadarErrorTitle(items, row-1), reason))
 			}
 		}
 		message := limitCreativeRadarSyncError(strings.Join(errorMessages, "；"))
@@ -409,7 +421,7 @@ type creativeRadarVideo struct {
 	Platform      string `json:"platform"`
 	Title         string `json:"title"`
 	AccountName   string `json:"account_name"`
-	VideoURL      string `json:"video_url,omitempty"`
+	VideoURL      string `json:"video_url"`
 	CoverURL      string `json:"cover_url"`
 	LikeCount     int64  `json:"like_count,omitempty"`
 	CommentCount  int64  `json:"comment_count,omitempty"`
@@ -417,7 +429,7 @@ type creativeRadarVideo struct {
 	ForwardCount  int64  `json:"forward_count,omitempty"`
 	PublishTime   string `json:"publish_time,omitempty"`
 	Duration      string `json:"duration,omitempty"`
-	ExportID      string `json:"export_id,omitempty"`
+	AwemeID       string `json:"aweme_id"`
 }
 
 func buildCreativeRadarVideos(record database.ExportRecord, items []database.ExportRecordItem) []creativeRadarVideo {
@@ -425,7 +437,7 @@ func buildCreativeRadarVideos(record database.ExportRecord, items []database.Exp
 	for _, item := range items {
 		videoURL := item.OriginalVideoURL
 		if record.OSSUploadEnabled {
-			videoURL = item.OSSVideoURL
+			videoURL = permanentCreativeRadarOSSURL(item.OSSVideoURL)
 		}
 		videos = append(videos, creativeRadarVideo{
 			Platform:      creativeRadarSource,
@@ -439,10 +451,22 @@ func buildCreativeRadarVideos(record database.ExportRecord, items []database.Exp
 			ForwardCount:  item.ForwardCount,
 			PublishTime:   item.PublishTime,
 			Duration:      formatCreativeRadarDuration(item.DurationMs),
-			ExportID:      item.VideoID,
+			AwemeID:       item.VideoID,
 		})
 	}
 	return videos
+}
+
+func permanentCreativeRadarOSSURL(rawURL string) string {
+	value := strings.TrimSpace(rawURL)
+	parsed, err := url.Parse(value)
+	if err != nil || !strings.EqualFold(parsed.Hostname(), "oss.fandow.com") ||
+		!strings.HasPrefix(parsed.Path, "/marketing-video-dashboard/") {
+		return value
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func formatCreativeRadarDuration(durationMs int64) string {
@@ -480,13 +504,18 @@ func (c *creativeRadarClient) upload(parent context.Context, videos []creativeRa
 		Source: creativeRadarSource,
 		Videos: videos,
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	// Keep signed OSS query strings in the same literal form as browser
+	// JSON.stringify. Some external receivers do not normalize Go's optional
+	// HTML escaping of '&' back from \u0026 before URL validation.
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(payload); err != nil {
 		return creativeRadarUploadResult{}, fmt.Errorf("生成请求失败: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(encoded.Bytes()))
 	if err != nil {
 		return creativeRadarUploadResult{}, fmt.Errorf("创建请求失败: %w", err)
 	}

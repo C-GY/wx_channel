@@ -84,22 +84,6 @@ func TestOSSSigV4MatchesBotocore(t *testing.T) {
 		t.Fatalf("Authorization = %q, want %q", got, want)
 	}
 
-	presignedURL, err := service.presignGet(
-		"wechat_channel/2026-07-17/video-1.mp4",
-		time.Date(2026, time.July, 17, 5, 20, 33, 0, time.UTC),
-	)
-	if err != nil {
-		t.Fatalf("presignGet() error = %v", err)
-	}
-	wantURL := "https://example.com/marketing-video-dashboard/wechat_channel/2026-07-17/video-1.mp4?" +
-		"X-Amz-Algorithm=AWS4-HMAC-SHA256&" +
-		"X-Amz-Credential=test-id%2F20260717%2Foss-cn-hangzhou%2Fs3%2Faws4_request&" +
-		"X-Amz-Date=20260717T052033Z&X-Amz-Expires=604800&" +
-		"X-Amz-Signature=3afdb2d5f45bdffac2b73b532f33ca2b522b12f67c7a71f29885c4964cefd56d&" +
-		"X-Amz-SignedHeaders=host"
-	if presignedURL != wantURL {
-		t.Fatalf("presignGet() = %q, want %q", presignedURL, wantURL)
-	}
 }
 
 func TestOSSServiceUploadVideo(t *testing.T) {
@@ -150,10 +134,11 @@ func TestOSSServiceUploadVideo(t *testing.T) {
 			if got := r.Header.Get("Range"); got != "bytes=0-0" {
 				t.Errorf("GET Range = %q", got)
 			}
-			for _, key := range []string{"X-Amz-Algorithm", "X-Amz-Credential", "X-Amz-Date", "X-Amz-Expires", "X-Amz-Signature", "X-Amz-SignedHeaders"} {
-				if r.URL.Query().Get(key) == "" {
-					t.Errorf("signed GET is missing %s", key)
-				}
+			if r.URL.RawQuery != "" {
+				t.Errorf("public GET should not contain a signature query: %q", r.URL.RawQuery)
+			}
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("public GET should not contain Authorization")
 			}
 			w.Header().Set("Content-Range", "bytes 0-0/19")
 			w.WriteHeader(http.StatusPartialContent)
@@ -203,7 +188,7 @@ func TestOSSServiceUploadVideo(t *testing.T) {
 	if !result.Verified || !result.AccessVerified {
 		t.Errorf("UploadVideo() verification flags = %+v", result)
 	}
-	if !strings.HasPrefix(result.URL, server.URL+wantPath+"?") || !strings.Contains(result.URL, "X-Amz-Signature=") {
+	if result.URL != server.URL+wantPath || strings.Contains(result.URL, "?") {
 		t.Errorf("UploadVideo() URL = %q", result.URL)
 	}
 	if len(progressValues) < 2 {

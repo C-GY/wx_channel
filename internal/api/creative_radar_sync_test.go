@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,7 +22,7 @@ func TestBuildCreativeRadarVideosMapsExportCSVFields(t *testing.T) {
 		Author:           "测试账号",
 		PublishTime:      "2026-07-21 12:30:00",
 		OriginalVideoURL: "https://finder.example/video.mp4",
-		OSSVideoURL:      "https://oss.example/video.mp4",
+		OSSVideoURL:      "https://oss.fandow.com/marketing-video-dashboard/wechat_channel/2026-07-22/video.mp4?X-Amz-Expires=604800&X-Amz-Signature=temporary",
 		CoverURL:         "https://oss.example/cover.jpg",
 		DurationMs:       125000,
 		LikeCount:        7,
@@ -34,10 +36,10 @@ func TestBuildCreativeRadarVideosMapsExportCSVFields(t *testing.T) {
 		t.Fatalf("video count = %d, want 1", len(videos))
 	}
 	video := videos[0]
-	if video.Platform != "wechat_channel" || video.ExportID != items[0].VideoID {
+	if video.Platform != "wechat_channel" || video.AwemeID != items[0].VideoID {
 		t.Fatalf("unexpected identity mapping: %#v", video)
 	}
-	if video.VideoURL != items[0].OSSVideoURL || video.AccountName != items[0].Author {
+	if video.VideoURL != "https://oss.fandow.com/marketing-video-dashboard/wechat_channel/2026-07-22/video.mp4" || video.AccountName != items[0].Author {
 		t.Fatalf("unexpected resource mapping: %#v", video)
 	}
 	if video.CoverURL != items[0].CoverURL {
@@ -195,19 +197,31 @@ func TestCreativeRadarClientUploadsExpectedEnvelope(t *testing.T) {
 		if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
 			t.Fatalf("unexpected request: %s, content-type=%q", r.Method, r.Header.Get("Content-Type"))
 		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upload request: %v", err)
+		}
+		if strings.Contains(string(raw), `\u0026`) {
+			t.Fatalf("signed URL query string was HTML-escaped: %s", raw)
+		}
+		if strings.Contains(string(raw), `"export_id"`) || !strings.Contains(string(raw), `"aweme_id"`) {
+			t.Fatalf("Creative Radar identity field should use aweme_id only: %s", raw)
+		}
 		var body struct {
 			APIKey string               `json:"api_key"`
 			Source string               `json:"source"`
 			Videos []creativeRadarVideo `json:"videos"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Fatalf("decode upload request: %v", err)
 		}
 		if body.APIKey != "test-key" || body.Source != creativeRadarSource || len(body.Videos) != 2 {
 			t.Fatalf("unexpected upload body: %#v", body)
 		}
-		if body.Videos[0].CoverURL != "https://example.com/cover.jpg" {
-			t.Fatalf("cover_url missing from upload body: %#v", body.Videos[0])
+		if body.Videos[0].VideoURL != "https://oss.example/video.mp4?signature=one&expires=two" ||
+			body.Videos[0].CoverURL != "https://example.com/cover.jpg?size=large&format=webp" ||
+			body.Videos[0].AwemeID != "video-aweme-id" {
+			t.Fatalf("resource identity fields missing from upload body: %#v", body.Videos[0])
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"code":200,"msg":"ok","data":{"total":2,"inserted":[101],"updated":[],"errors":[{"index":1,"reason":"title必填"}]}}`))
@@ -220,7 +234,12 @@ func TestCreativeRadarClientUploadsExpectedEnvelope(t *testing.T) {
 		httpClient: &http.Client{Timeout: time.Second},
 	}
 	result, err := client.upload(context.Background(), []creativeRadarVideo{
-		{Platform: creativeRadarSource, Title: "one", AccountName: "author", CoverURL: "https://example.com/cover.jpg"},
+		{
+			Platform: creativeRadarSource, Title: "one", AccountName: "author",
+			VideoURL: "https://oss.example/video.mp4?signature=one&expires=two",
+			CoverURL: "https://example.com/cover.jpg?size=large&format=webp",
+			AwemeID:  "video-aweme-id",
+		},
 		{Platform: creativeRadarSource, Title: "", AccountName: "author"},
 	})
 	if err != nil {

@@ -28,6 +28,52 @@ function __build_feed_header_icon(id, title, svgMarkup) {
   return wrapper;
 }
 
+function __build_feed_creative_radar_button() {
+  var button = document.createElement('button');
+  button.id = 'wx-feed-creative-radar-sync';
+  button.type = 'button';
+  button.textContent = '同步创意雷达系统';
+  button.title = '加入队列：下载、上传 OSS 并同步创意雷达系统';
+  button.style.cssText = [
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'height:28px',
+    'padding:0 12px',
+    'margin-right:16px',
+    'border:0',
+    'border-radius:6px',
+    'background:#07c160',
+    'color:#fff',
+    'font-size:12px',
+    'font-weight:500',
+    'line-height:28px',
+    'white-space:nowrap',
+    'cursor:pointer',
+    'box-shadow:0 3px 10px rgba(7,193,96,0.28)',
+    'transition:opacity 0.2s, background 0.2s',
+    'flex-shrink:0'
+  ].join(';');
+  button.onclick = function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    __handle_feed_creative_radar_sync_click(button);
+  };
+  button.onmouseenter = function () {
+    if (!button.disabled) button.style.background = '#06ad56';
+  };
+  button.onmouseleave = function () {
+    button.style.background = '#07c160';
+  };
+  return button;
+}
+
+function __reset_feed_creative_radar_button(videoId) {
+  var button = document.getElementById('wx-feed-creative-radar-sync');
+  if (!button || typeof __reset_single_creative_radar_button_for_video__ !== 'function') return;
+  __reset_single_creative_radar_button_for_video__(button, videoId);
+}
+
 function __get_visible_feed_op_items() {
   var selectors = [
     '.op-item',
@@ -351,6 +397,7 @@ function __remember_current_feed(feed, reason) {
   }
 
   __wx_feed_runtime_state.activeFeedId = nextId || __get_active_feed_id();
+  __reset_feed_creative_radar_button(__wx_feed_runtime_state.activeFeedId);
   if (reason) {
     console.log('[feed.js] 已同步当前视频:', reason, profile.id, profile.title);
   }
@@ -412,6 +459,7 @@ function __start_feed_slide_monitor() {
     if (!activeFeedId || activeFeedId === __wx_feed_runtime_state.activeFeedId) return;
 
     __wx_feed_runtime_state.activeFeedId = activeFeedId;
+    __reset_feed_creative_radar_button(activeFeedId);
     console.log('[feed.js] 检测到当前视频切换:', activeFeedId);
 
     setTimeout(function () { __sync_feed_profile_with_runtime(true); }, 80);
@@ -433,11 +481,23 @@ async function __insert_download_btn_to_feed_toolbar() {
     var container = findToolbarContainer();
     if (!container) return false;
 
-    // 检查是否已存在
-    if (container.querySelector('#wx-feed-comment-icon') || container.querySelector('#wx-feed-download-icon')) {
+    var customButtonIds = [
+      'wx-feed-comment-icon',
+      'wx-feed-download-icon',
+      'wx-feed-creative-radar-sync',
+      'wx-feed-export-icon'
+    ];
+    var hasAllButtons = customButtonIds.every(function (id) {
+      return !!container.querySelector('#' + id);
+    });
+    if (hasAllButtons) {
       console.log('[feed.js] 工具栏按钮已存在');
       return true;
     }
+    customButtonIds.forEach(function (id) {
+      var oldButton = container.querySelector('#' + id);
+      if (oldButton) oldButton.remove();
+    });
 
     // 创建评论图标
     var commentIconWrapper = __build_feed_header_icon(
@@ -461,6 +521,8 @@ async function __insert_download_btn_to_feed_toolbar() {
       __handle_feed_download_click();
     };
 
+    var radarSyncButton = __build_feed_creative_radar_button();
+
     // Create Export icon
     var exportIconWrapper = __build_feed_header_icon(
       'wx-feed-export-icon',
@@ -474,8 +536,10 @@ async function __insert_download_btn_to_feed_toolbar() {
 
     // Insert into container
     container.insertBefore(exportIconWrapper, container.firstChild);
+    container.insertBefore(radarSyncButton, container.firstChild);
     container.insertBefore(downloadIconWrapper, container.firstChild);
     container.insertBefore(commentIconWrapper, container.firstChild);
+    __reset_feed_creative_radar_button(__get_active_feed_id());
 
     console.log('[feed.js] ✅ 工具栏按钮注入成功');
     __wx_log({ msg: "注入评论获取和下载按钮成功!" });
@@ -526,6 +590,28 @@ function __handle_feed_download_click() {
   }
 
   __show_feed_download_options(profile);
+}
+
+function __handle_feed_creative_radar_sync_click(actionButton) {
+  if (typeof __sync_single_video_to_creative_radar__ !== 'function') {
+    __wx_log({ msg: '❌ 同步组件尚未加载，请稍后重试' });
+    return;
+  }
+
+  var profile = __sync_feed_profile_with_runtime(false);
+  if (profile && profile.url) {
+    __sync_single_video_to_creative_radar__(profile, actionButton);
+    return;
+  }
+
+  __wx_log({ msg: '⏳ 正在获取视频数据，请稍候...' });
+  __resolve_current_feed_profile(12, 180).then(function (resolvedProfile) {
+    if (!resolvedProfile) {
+      __wx_log({ msg: '❌ 获取当前视频数据超时，请翻到目标视频后重试' });
+      return;
+    }
+    __sync_single_video_to_creative_radar__(resolvedProfile, actionButton);
+  });
 }
 
 /** Feed页面下载选项菜单 */

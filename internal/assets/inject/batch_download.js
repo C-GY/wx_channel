@@ -1035,6 +1035,205 @@ async function __wait_batch_export_and_sync_creative_radar__(exportRecordId) {
   throw new Error('等待 CSV 生成并同步创意雷达超时');
 }
 
+async function __ensure_single_creative_radar_oss_config__() {
+  var accessKeyId = __wx_batch_default_oss_access_key_id__;
+  var hasSavedSecret = false;
+
+  try {
+    var readResponse = await fetch('/__wx_channels_api/oss_config', {
+      method: 'GET',
+      headers: __wx_channels_batch_api_headers__()
+    });
+    var readResult = await readResponse.json().catch(function () { return {}; });
+    if (readResponse.ok && (typeof readResult.code !== 'number' || readResult.code === 0)) {
+      var readData = readResult.data || readResult;
+      accessKeyId = String(readData.accessKeyId || accessKeyId).trim() || accessKeyId;
+      hasSavedSecret = !!readData.hasSecret;
+    }
+  } catch (readError) {
+    console.warn('[单视频同步] 读取 OSS 配置失败，将使用默认配置:', readError);
+  }
+
+  var saveResponse = await fetch('/__wx_channels_api/oss_config', {
+    method: 'POST',
+    headers: __wx_channels_batch_api_headers__(),
+    body: JSON.stringify({
+      accessKeyId: accessKeyId,
+      accessKeySecret: hasSavedSecret ? '' : __wx_batch_default_oss_access_key_secret__
+    })
+  });
+  var saveResult = await saveResponse.json().catch(function () { return {}; });
+  if (!saveResponse.ok || (typeof saveResult.code === 'number' && saveResult.code !== 0)) {
+    throw new Error(__batch_oss_response_error__(saveResult, '保存 OSS 配置失败'));
+  }
+
+  __wx_batch_download_manager__.ossUploadEnabled = true;
+  __wx_batch_download_manager__.ossAccessKeyId = accessKeyId;
+  __wx_batch_download_manager__.ossSavedAccessKeyId = accessKeyId;
+  __wx_batch_download_manager__.ossHasSavedSecret = true;
+  __wx_batch_download_manager__.ossConfigLoaded = true;
+  return { enabled: true };
+}
+
+function __single_creative_radar_button_matches_video__(button, videoId) {
+  if (!button) return false;
+  return String(button.getAttribute('data-sync-video-id') || '') === String(videoId || '');
+}
+
+function __reset_single_creative_radar_button_for_video__(button, videoId) {
+  if (!button) return false;
+  var nextVideoId = String(videoId || '');
+  var currentVideoId = String(button.getAttribute('data-current-video-id') || '');
+  if (nextVideoId && currentVideoId === nextVideoId) return false;
+
+  button.setAttribute('data-current-video-id', nextVideoId);
+  button.setAttribute('data-sync-video-id', '');
+  button.setAttribute('data-sync-busy', 'false');
+  button.disabled = false;
+  button.style.opacity = '1';
+  button.style.pointerEvents = 'auto';
+  button.style.cursor = 'pointer';
+  button.textContent = '同步创意雷达系统';
+  return true;
+}
+
+async function __sync_single_video_to_creative_radar__(profile, actionButton) {
+  if (!profile || profile.canDownload === false || profile.type === 'live' || profile.type === 'picture') {
+    __wx_log({ msg: '❌ 当前内容不是可同步的视频' });
+    return false;
+  }
+
+  var video = Object.assign({}, profile);
+  video.id = String(video.id || '').trim();
+  if (!video.id) {
+    __wx_log({ msg: '❌ 当前视频缺少视频 ID，无法同步' });
+    return false;
+  }
+  if (video.key === undefined || video.key === null) video.key = '';
+  video.capturedAt = video.capturedAt || new Date().toISOString();
+
+  var normalizedDownload = typeof __wx_channels_normalize_video_download__ === 'function'
+    ? __wx_channels_normalize_video_download__(video, null)
+    : { url: video.url || '' };
+  video.url = normalizedDownload.url || video.url || '';
+  if (!video.url) {
+    __wx_log({ msg: '❌ 当前视频链接未就绪，请稍后重试' });
+    return false;
+  }
+
+  if (actionButton) {
+    actionButton.setAttribute('data-current-video-id', video.id);
+    actionButton.setAttribute('data-sync-video-id', video.id);
+  }
+
+  window.__wx_single_creative_radar_sync_jobs__ = window.__wx_single_creative_radar_sync_jobs__ || {};
+  if (window.__wx_single_creative_radar_sync_jobs__[video.id]) {
+    __wx_log({ msg: '⏳ 当前视频已在下载同步队列中' });
+    if (actionButton) {
+      actionButton.textContent = '已在队列中';
+      setTimeout(function () {
+        if (__single_creative_radar_button_matches_video__(actionButton, video.id)) {
+          actionButton.textContent = '同步创意雷达系统';
+        }
+      }, 1600);
+    }
+    return true;
+  }
+  window.__wx_single_creative_radar_sync_jobs__[video.id] = 'creating';
+
+  var originalButtonText = actionButton && actionButton.textContent
+    ? actionButton.textContent
+    : '同步创意雷达系统';
+  if (actionButton) {
+    actionButton.disabled = true;
+    actionButton.setAttribute('data-sync-busy', 'true');
+    actionButton.style.opacity = '0.65';
+    actionButton.textContent = '正在加入队列...';
+  }
+
+  var exportRecord = null;
+  var queued = false;
+  try {
+    var ossState = await __ensure_single_creative_radar_oss_config__();
+    var preparedEntries = __prepare_batch_download_entries__([video]);
+    if (preparedEntries.length !== 1) {
+      throw new Error('当前视频数据不完整，无法创建下载任务');
+    }
+
+    var exportedAt = new Date().toISOString();
+    exportRecord = await __create_batch_export_record__([video], true, exportedAt, true);
+    var started = await __batch_download_selected__({
+      videos: [video],
+      preparedEntries: preparedEntries,
+      ossState: ossState,
+      exportRecordId: exportRecord.id
+    });
+    if (!started) {
+      await __mark_batch_export_failed__(exportRecord.id, '未能启动关联的下载及 OSS 上传任务');
+      throw new Error('未能启动下载同步任务');
+    }
+
+    window.__wx_single_creative_radar_sync_jobs__[video.id] = exportRecord.id;
+    queued = true;
+    __wx_log({ msg: '✅ 当前视频已加入队列：下载 → 上传 OSS → 同步创意雷达' });
+    if (actionButton) actionButton.textContent = '已加入队列';
+
+    __wait_batch_export_and_sync_creative_radar__(exportRecord.id)
+      .then(function (record) {
+        __wx_log({
+          msg: '✅ 当前视频已同步创意雷达：新增 ' +
+            Number(record.creativeRadarInserted || 0) + ' 条，更新 ' +
+            Number(record.creativeRadarUpdated || 0) + ' 条'
+        });
+        if (actionButton && actionButton.isConnected !== false &&
+            __single_creative_radar_button_matches_video__(actionButton, video.id)) {
+          actionButton.textContent = '同步成功';
+        }
+      })
+      .catch(function (error) {
+        __wx_log({ msg: '❌ 当前视频同步失败：' + (error.message || error) });
+        if (actionButton && actionButton.isConnected !== false &&
+            __single_creative_radar_button_matches_video__(actionButton, video.id)) {
+          actionButton.textContent = '同步失败';
+        }
+      })
+      .finally(function () {
+        delete window.__wx_single_creative_radar_sync_jobs__[video.id];
+        if (actionButton && actionButton.isConnected !== false &&
+            __single_creative_radar_button_matches_video__(actionButton, video.id)) {
+          actionButton.setAttribute('data-sync-busy', 'false');
+          setTimeout(function () {
+            if (__single_creative_radar_button_matches_video__(actionButton, video.id)) {
+              actionButton.disabled = false;
+              actionButton.style.opacity = '1';
+              actionButton.textContent = originalButtonText;
+            }
+          }, 2200);
+        }
+      });
+    return true;
+  } catch (error) {
+    delete window.__wx_single_creative_radar_sync_jobs__[video.id];
+    if (exportRecord && exportRecord.id) {
+      await __mark_batch_export_failed__(exportRecord.id, error.message || String(error));
+    }
+    __wx_log({ msg: '❌ 加入创意雷达同步队列失败：' + (error.message || error) });
+    if (actionButton) actionButton.textContent = '加入队列失败';
+    return false;
+  } finally {
+    if (actionButton && !queued) {
+      setTimeout(function () {
+        if (__single_creative_radar_button_matches_video__(actionButton, video.id)) {
+          actionButton.disabled = false;
+          actionButton.setAttribute('data-sync-busy', 'false');
+          actionButton.style.opacity = '1';
+          actionButton.textContent = originalButtonText;
+        }
+      }, 1600);
+    }
+  }
+}
+
 function __export_batch_video_list__() {
   var videos = __get_batch_export_videos__();
 

@@ -169,7 +169,6 @@ function __can_enable_home_download() {
 
 function __update_download_button_state() {
   var buttons = __get_home_download_buttons__();
-  if (buttons.length === 0) return;
   var canDownload = __can_enable_home_download();
 
   for (var i = 0; i < buttons.length; i++) {
@@ -200,6 +199,13 @@ function __update_download_button_state() {
       }
     }
   }
+
+  var radarButton = document.getElementById('wx-home-creative-radar-sync');
+  if (!radarButton || radarButton.getAttribute('data-sync-busy') === 'true') return;
+  radarButton.disabled = !canDownload;
+  radarButton.style.opacity = canDownload ? '1' : '0.55';
+  radarButton.style.cursor = canDownload ? 'pointer' : 'not-allowed';
+  radarButton.style.pointerEvents = canDownload ? 'auto' : 'none';
 }
 
 function __handle_home_download_click() {
@@ -218,18 +224,91 @@ function __handle_home_download_click() {
   });
 }
 
+function __handle_home_creative_radar_sync_click(actionButton) {
+  if (!__can_enable_home_download()) {
+    __wx_log({ msg: '当前内容暂不支持同步创意雷达系统' });
+    return;
+  }
+  if (typeof __sync_single_video_to_creative_radar__ !== 'function') {
+    __wx_log({ msg: '❌ 同步组件尚未加载，请稍后重试' });
+    return;
+  }
+
+  __resolve_current_home_profile(8, 220).then(function (profile) {
+    if (!profile) {
+      __wx_log({ msg: '❌ 获取当前视频数据失败，请等待视频完全加载后重试' });
+      return;
+    }
+    __sync_single_video_to_creative_radar__(profile, actionButton);
+  });
+}
+
+function __create_home_creative_radar_button() {
+  var button = document.createElement('button');
+  button.id = 'wx-home-creative-radar-sync';
+  button.type = 'button';
+  button.textContent = '同步创意雷达系统';
+  button.title = '加入队列：下载、上传 OSS 并同步创意雷达系统';
+  button.style.cssText = [
+    'position:fixed',
+    'z-index:99997',
+    'display:flex',
+    'align-items:center',
+    'justify-content:center',
+    'height:28px',
+    'padding:0 12px',
+    'border:0',
+    'border-radius:6px',
+    'background:#07c160',
+    'color:#fff',
+    'font-size:12px',
+    'font-weight:500',
+    'line-height:28px',
+    'white-space:nowrap',
+    'cursor:pointer',
+    'box-shadow:0 3px 10px rgba(7,193,96,0.28)',
+    'transition:opacity 0.2s, background 0.2s',
+    'user-select:none'
+  ].join(';');
+  button.onclick = function (event) {
+    event.preventDefault();
+    event.stopPropagation();
+    __handle_home_creative_radar_sync_click(button);
+  };
+  button.onmouseenter = function () {
+    if (!button.disabled) button.style.background = '#06ad56';
+  };
+  button.onmouseleave = function () {
+    button.style.background = '#07c160';
+  };
+  return button;
+}
+
+function __reset_home_creative_radar_button(videoId) {
+  var button = document.getElementById('wx-home-creative-radar-sync');
+  if (!button || typeof __reset_single_creative_radar_button_for_video__ !== 'function') return;
+  __reset_single_creative_radar_button_for_video__(button, videoId);
+}
+
 // ==================== 下载按钮注入 ====================
 async function __ensure_home_download_button(forceReinject) {
   if (!window.location.pathname.includes('/pages/home')) return false;
 
   var existing = document.getElementById('wx-home-download-icon');
+  var existingRadarButton = document.getElementById('wx-home-creative-radar-sync');
   if (existing && !forceReinject) {
+    if (!existingRadarButton) {
+      existingRadarButton = __create_home_creative_radar_button();
+      document.body.appendChild(existingRadarButton);
+    }
     __position_home_download_button(existing);
+    __position_home_creative_radar_button(existingRadarButton, existing);
     __update_download_button_state();
     return true;
   }
 
   if (existing) existing.remove();
+  if (existingRadarButton) existingRadarButton.remove();
 
   var button = document.createElement('div');
   button.id = 'wx-home-download-icon';
@@ -263,7 +342,11 @@ async function __ensure_home_download_button(forceReinject) {
   };
 
   document.body.appendChild(button);
+  var radarButton = __create_home_creative_radar_button();
+  document.body.appendChild(radarButton);
   __position_home_download_button(button);
+  __position_home_creative_radar_button(radarButton, button);
+  __reset_home_creative_radar_button(__get_active_home_feed_id());
   __update_download_button_state();
   return true;
 }
@@ -290,6 +373,7 @@ function __start_home_slide_monitor() {
 
     __update_tab_display();
     __ensure_home_download_button(false);
+    __reset_home_creative_radar_button(__get_active_home_feed_id());
 
     if (__current_tab_type__ === 'video-player') {
       __sync_home_profile_with_runtime(false);
@@ -348,6 +432,25 @@ function __position_home_download_button(button) {
 
   button.style.left = Math.max(16, left) + 'px';
   button.style.top = Math.max(8, searchRect.top) + 'px';
+}
+
+function __position_home_creative_radar_button(button, downloadButton) {
+  if (!button) return;
+
+  if (!downloadButton || !downloadButton.getBoundingClientRect) {
+    button.style.top = '12px';
+    button.style.right = '96px';
+    return;
+  }
+
+  var downloadRect = downloadButton.getBoundingClientRect();
+  var buttonWidth = button.offsetWidth || 124;
+  var buttonHeight = button.offsetHeight || 28;
+  var left = downloadRect.left - buttonWidth - 12;
+  var top = downloadRect.top + ((downloadRect.height || 20) - buttonHeight) / 2;
+
+  button.style.left = Math.max(12, left) + 'px';
+  button.style.top = Math.max(6, top) + 'px';
 }
 
 function __get_active_home_feed_element() {
@@ -618,6 +721,8 @@ function __get_current_home_profile() {
 function __sync_home_profile_with_runtime(forceLog) {
   var profile = __get_current_home_profile();
   if (!profile) return null;
+
+  __reset_home_creative_radar_button(profile.id);
 
   if (forceLog) {
     console.log('[home.js] 已同步当前首页视频:', profile.id, profile.title);
